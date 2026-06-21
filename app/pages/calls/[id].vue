@@ -4,8 +4,10 @@ import { computed, ref, watchEffect } from 'vue'
 import {
   AlertTriangle,
   ArrowUpRight,
+  ChevronRight,
   Clock,
   Inbox,
+  Info,
   ListChecks,
   Phone,
   RefreshCw,
@@ -21,6 +23,12 @@ import { Button } from '~/components/ui/button'
 import { Progress } from '~/components/ui/progress'
 import { Skeleton } from '~/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '~/components/ui/tabs'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger
+} from '~/components/ui/tooltip'
 import TranscriptViewer from '~/components/TranscriptViewer.vue'
 import FindingCard from '~/components/FindingCard.vue'
 import RecommendationCard from '~/components/RecommendationCard.vue'
@@ -30,13 +38,14 @@ import FlowDrift from '~/components/FlowDrift.vue'
 import { useApi } from '~/composables/useApi'
 import { useBreadcrumb } from '~/composables/useBreadcrumb'
 import { useTone } from '~/composables/useTone'
+import { humanizeOutcome } from '~/lib/format'
 import { cn } from '~/lib/utils'
 
 const route = useRoute()
 const id = computed(() => route.params.id as string)
 const { getCall, analyzeCall } = useApi()
 const { setBreadcrumb } = useBreadcrumb()
-const { scoreTone } = useTone()
+const { scoreTone, scoreToneName, scoreToneSet } = useTone()
 
 const { data, pending, error, refresh } = await useAsyncData(`call-${id.value}`, () => getCall(id.value))
 
@@ -64,10 +73,26 @@ watchEffect(() => {
 
 /* ----------------------------------------------------------------------------
  * Shared cross-highlight state between findings / use-actions / timeline /
- * flow-drift and the transcript.
+ * flow-drift and the transcript (P13 / spec W19).
+ *
+ * Two layers:
+ *   · `flashIdxs` — a transient (1.6s) bg-tint flash, the SCROLL cue when a
+ *     surface points at turns. Kept as an additional cue.
+ *   · `activeTurnIdxs` — the PERSISTED selection: the accent ring that stays
+ *     painted on the transcript and the timeline bar until the selection
+ *     changes. This is what makes the cross-highlight a real two-way link
+ *     rather than a momentary flash.
+ *
+ * Every entry point (a clicked transcript turn, a timeline bar, a flow node,
+ * a finding, a use-action range) sets BOTH: it persists the selection AND
+ * fires a flash so the transcript scrolls to it.
  * ------------------------------------------------------------------------- */
 const flashIdxs = ref<number[]>([])
+const activeTurnIdxs = ref<number[]>([])
 const activeFindingId = ref<string | null>(null)
+
+/** Controlled tab so the compact Flow-adherence card can deep-link into Flow drift (P12). */
+const activeTab = ref('findings')
 
 const evidenceIdxs = computed(() => {
   const set = new Set<number>()
@@ -77,27 +102,119 @@ const evidenceIdxs = computed(() => {
   return [...set]
 })
 
+/**
+ * The single active turn the timeline rings (CallTimeline takes one idx). When a
+ * range is selected we anchor on its lowest turn so the timeline + transcript
+ * agree on a single accented bar.
+ */
+const activeTurnIdx = computed<number | null>(() =>
+  activeTurnIdxs.value.length ? Math.min(...activeTurnIdxs.value) : null
+)
+
+/** Persist a turn selection + flash-scroll to it (the shared primitive). */
+function selectTurns(turnIdxs: number[]) {
+  if (turnIdxs.length) {
+    activeTurnIdxs.value = [...turnIdxs]
+    flashIdxs.value = [...turnIdxs]
+  }
+}
+
 function selectFinding(f: Finding) {
   activeFindingId.value = f.id
-  if (f.evidenceTurnIdxs.length) flashIdxs.value = [...f.evidenceTurnIdxs]
+  selectTurns(f.evidenceTurnIdxs)
 }
 
 function focusRange(range: [number, number]) {
   const [a, b] = range
   const out: number[] = []
   for (let i = Math.min(a, b); i <= Math.max(a, b); i++) out.push(i)
-  flashIdxs.value = out
+  activeFindingId.value = null
+  selectTurns(out)
 }
 
+/** A clicked / keyboarded timeline bar — persist its turn everywhere (P13). */
 function focusTurn(turnIdx: number) {
-  flashIdxs.value = [turnIdx]
+  activeFindingId.value = null
+  selectTurns([turnIdx])
 }
+
+/**
+ * A clicked flow-drift node — FlowDrift emits the matched turn indices for the
+ * node, so we persist those turns. (FlowDrift owns its own active-node visuals
+ * via the turns it cited; we don't reach into its node id here.)
+ */
 function focusIdxs(turnIdxs: number[]) {
-  if (turnIdxs.length) flashIdxs.value = [...turnIdxs]
+  activeFindingId.value = null
+  selectTurns(turnIdxs)
+}
+
+/** A clicked / keyboarded transcript turn — persist it so timeline stays in sync. */
+function onSelectTurn(turnIdx: number) {
+  activeFindingId.value = null
+  selectTurns([turnIdx])
 }
 
 const criterionLabel = (criterionId: string) =>
   agent.value?.successCriteria.find(c => c.id === criterionId)?.label ?? criterionId
+
+/* ----------------------------------------------------------------------------
+ * P12 — always-visible compact Flow adherence summary.
+ *
+ * Flow adherence (differentiator #2) otherwise lives only behind the 4th tab.
+ * Surface a persistent compact card under the scorecard: the score + band + a
+ * one-line expected-vs-actual sentence derived from flowAlignment.actualPath,
+ * naming what was skipped vs. what actually happened. The full drift list stays
+ * in the Flow drift tab.
+ * ------------------------------------------------------------------------- */
+const flowScore = computed(() => flowAlignment.value?.conformanceScore ?? null)
+const flowToneSet = computed(() => scoreToneSet(flowScore.value))
+const flowBandLabel = computed(() => {
+  const band = scoreToneName(flowScore.value)
+  if (band === 'success') return 'On track'
+  if (band === 'warning') return 'Some drift'
+  if (band === 'danger') return 'Significant drift'
+  return 'Not measured'
+})
+
+/** Required (expected) nodes that the call skipped — the headline gap. */
+const flowSkippedLabels = computed(() => {
+  const al = flowAlignment.value
+  if (!al) return []
+  return al.nodeAlignments
+    .filter(na => na.status === 'skipped' && na.nodeId
+      && (expectedFlow.value?.nodes.find(n => n.id === na.nodeId)?.expected ?? true))
+    .map(na => na.label)
+})
+
+/** Count of nodes the call actually traversed (length of the real path). */
+const flowActualCount = computed(() => flowAlignment.value?.actualPath.length ?? 0)
+
+/** Out-of-order / extra steps that drifted from the design. */
+const flowDriftedCount = computed(() =>
+  flowAlignment.value?.nodeAlignments
+    .filter(na => na.status !== 'hit' && na.driftScore > 0).length ?? 0
+)
+
+/**
+ * One-line expected-vs-actual sentence (P12). Honest: it states the count of
+ * required steps the call walked vs. what it skipped, never inventing detail.
+ */
+const flowSummaryLine = computed(() => {
+  const al = flowAlignment.value
+  if (!al) return ''
+  const skipped = flowSkippedLabels.value
+  const walked = flowActualCount.value
+  const expectedTotal = (expectedFlow.value?.nodes ?? []).filter(n => n.expected).length
+  if (skipped.length) {
+    const head = skipped.slice(0, 2).join(', ')
+    const more = skipped.length > 2 ? ` +${skipped.length - 2} more` : ''
+    return `Walked ${walked} of ${expectedTotal} expected steps — skipped ${head}${more}.`
+  }
+  if (flowDriftedCount.value > 0) {
+    return `Hit every expected step, but ${flowDriftedCount.value} drifted (out of order or unplanned).`
+  }
+  return `Followed all ${expectedTotal} expected steps in the designed order.`
+})
 
 /* ----------------------------------------------------------------------------
  * Re-analyze (W12) — overlay the scorecard/tabs/timeline with a re-scoring
@@ -237,53 +354,83 @@ const rescoringClass = computed(() =>
               variant="secondary"
               class="rounded-md font-medium"
             >
-              {{ call.outcome }}
+              {{ humanizeOutcome(call.outcome) }}
             </Badge>
           </div>
 
-          <div class="flex items-center gap-5">
-            <div
-              v-if="flowAlignment"
-              class="text-right"
-            >
-              <div class="text-[12px] text-muted-foreground">
-                Flow adherence
+          <TooltipProvider :delay-duration="120">
+            <div class="flex items-center gap-5">
+              <!-- Flow adherence (= conformanceScore) — defined on first use (P04/P09/P16). -->
+              <div
+                v-if="flowAlignment"
+                class="text-right"
+              >
+                <Tooltip>
+                  <TooltipTrigger as-child>
+                    <button
+                      type="button"
+                      class="inline-flex items-center gap-1 rounded-md text-[12px] text-muted-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary hover:text-foreground"
+                      aria-label="What is Flow adherence?"
+                    >
+                      Flow adherence
+                      <Info class="size-3" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent class="max-w-xs text-xs leading-relaxed">
+                    How closely this call followed its expected flow — every
+                    required step hit, in the designed order (0–100).
+                  </TooltipContent>
+                </Tooltip>
+                <div :class="cn('text-[30px] font-semibold leading-none tabular-nums', scoreTone(flowAlignment.conformanceScore))">
+                  {{ Math.round(flowAlignment.conformanceScore) }}
+                </div>
               </div>
-              <div :class="cn('text-[30px] font-semibold leading-none tabular-nums', scoreTone(flowAlignment.conformanceScore))">
-                {{ Math.round(flowAlignment.conformanceScore) }}
+              <!-- Call score (= scorecard.overall) — renamed from "Script adherence" (P04). -->
+              <div
+                v-if="analysis"
+                class="text-right"
+              >
+                <Tooltip>
+                  <TooltipTrigger as-child>
+                    <button
+                      type="button"
+                      class="inline-flex items-center gap-1 rounded-md text-[12px] text-muted-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary hover:text-foreground"
+                      aria-label="What is Call score?"
+                    >
+                      Call score
+                      <Info class="size-3" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent class="max-w-xs text-xs leading-relaxed">
+                    The overall weighted QA score for this call (0–100), across
+                    every success criterion — outcome, behavior, compliance, tone.
+                  </TooltipContent>
+                </Tooltip>
+                <div :class="cn('text-[30px] font-semibold leading-none tabular-nums', scoreTone(analysis.scorecard.overall))">
+                  {{ Math.round(analysis.scorecard.overall) }}
+                </div>
               </div>
-            </div>
-            <div
-              v-if="analysis"
-              class="text-right"
-            >
-              <div class="text-[12px] text-muted-foreground">
-                Script adherence
-              </div>
-              <div :class="cn('text-[30px] font-semibold leading-none tabular-nums', scoreTone(analysis.scorecard.overall))">
-                {{ Math.round(analysis.scorecard.overall) }}
-              </div>
-            </div>
 
-            <div class="flex flex-col items-end gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                :disabled="reanalyzing"
-                @click="reanalyze"
-              >
-                <RefreshCw :class="['size-4', reanalyzing && 'motion-safe:animate-spin']" />
-                {{ reanalyzing ? 'Analyzing…' : (analysis ? 'Re-run analysis' : 'Analyze call') }}
-              </Button>
-              <NuxtLink
-                :to="`/calls?agentId=${agent.id}`"
-                class="inline-flex items-center gap-1 rounded-md text-[12px] font-medium text-primary hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
-              >
-                View all calls
-                <ArrowUpRight class="size-3" />
-              </NuxtLink>
+              <div class="flex flex-col items-end gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  :disabled="reanalyzing"
+                  @click="reanalyze"
+                >
+                  <RefreshCw :class="['size-4', reanalyzing && 'motion-safe:animate-spin']" />
+                  {{ reanalyzing ? 'Analyzing…' : (analysis ? 'Re-run analysis' : 'Analyze call') }}
+                </Button>
+                <NuxtLink
+                  :to="`/calls?agentId=${agent.id}`"
+                  class="inline-flex items-center gap-1 rounded-md text-[12px] font-medium text-primary hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                >
+                  View all calls
+                  <ArrowUpRight class="size-3" />
+                </NuxtLink>
+              </div>
             </div>
-          </div>
+          </TooltipProvider>
         </div>
       </SectionCard>
 
@@ -303,6 +450,8 @@ const rescoringClass = computed(() =>
             :evidence-idxs="evidenceIdxs"
             :use-actions="analysis?.useActions ?? []"
             :flash-idxs="flashIdxs"
+            :active-turn-idxs="activeTurnIdxs"
+            @select-turn="onSelectTurn"
           />
         </SectionCard>
 
@@ -341,10 +490,51 @@ const rescoringClass = computed(() =>
               </div>
             </SectionCard>
 
+            <!-- P12 — always-visible compact Flow adherence summary.
+                 Surfaces differentiator #2 at the same altitude as Findings,
+                 with a one-line expected-vs-actual from actualPath. The full
+                 drift list stays in the Flow drift tab (deep-linked below). -->
+            <SectionCard
+              v-if="flowAlignment"
+              padding="dense"
+            >
+              <div class="flex flex-col gap-3">
+                <div class="flex items-start justify-between gap-4">
+                  <div class="flex min-w-0 flex-col gap-0.5">
+                    <div class="flex items-center gap-1.5">
+                      <span class="text-[12px] font-medium text-muted-foreground">
+                        Flow adherence
+                      </span>
+                      <span :class="cn('rounded-full px-1.5 py-0.5 text-[11px] font-medium', flowToneSet.badge)">
+                        {{ flowBandLabel }}
+                      </span>
+                    </div>
+                    <p class="text-sm leading-snug text-muted-foreground">
+                      {{ flowSummaryLine }}
+                    </p>
+                  </div>
+                  <div class="flex shrink-0 items-end gap-0.5">
+                    <span :class="cn('text-[24px] font-semibold leading-none tabular-nums', flowToneSet.text)">
+                      {{ Math.round(flowAlignment.conformanceScore) }}
+                    </span>
+                    <span class="pb-0.5 text-[12px] text-muted-foreground">/ 100</span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  class="inline-flex w-fit items-center gap-1 rounded-md text-[12px] font-medium text-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary hover:underline"
+                  @click="activeTab = 'flow'"
+                >
+                  See full flow drift
+                  <ChevronRight class="size-3.5" />
+                </button>
+              </div>
+            </SectionCard>
+
             <!-- Tabbed detail. Flow-drift slot always renders (W36) so the strip
                  doesn't reflow per call. -->
             <Tabs
-              default-value="findings"
+              v-model="activeTab"
               class="gap-3"
             >
               <TabsList class="w-full">
@@ -523,12 +713,14 @@ const rescoringClass = computed(() =>
       <SectionCard
         v-if="timeline"
         title="Voice Pipeline Timeline"
-        description="Where latency is spent across the realtime pipeline — caller, STT/VAD, endpoint, LLM, TTS, agent."
+        description="Where latency is spent across the realtime pipeline — caller, STT/VAD, endpoint, LLM, TTS, agent. Per-stage timing is modeled (reconstructed from published budgets, scaled to this call's real duration), not directly measured."
         padding="dense"
         :class="rescoringClass"
       >
         <CallTimeline
           :timeline="timeline"
+          :duration-sec="call.durationSec"
+          :active-turn-idx="activeTurnIdx"
           @select-turn="focusTurn"
         />
       </SectionCard>

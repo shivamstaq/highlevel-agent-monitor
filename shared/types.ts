@@ -272,7 +272,13 @@ export const RecommendationItemSchema = z.object({
   agentName: z.string(),
   contactName: z.string().optional(),
   callScore: z.number().min(0).max(100).optional(),
-  callStartedAt: z.string().optional()
+  callStartedAt: z.string().optional(),
+  /** How many calls raised this same advice (dedup bucket size) — drives the "seen on N calls" chip. */
+  callCount: z.number().int().nonnegative(),
+  /** How many distinct agents raised this same advice across the fleet. */
+  agentCount: z.number().int().nonnegative(),
+  /** Names of the distinct agents that raised it (for the cross-agent chip tooltip). */
+  agentNames: z.array(z.string()).optional()
 })
 export type RecommendationItem = z.infer<typeof RecommendationItemSchema>
 
@@ -324,6 +330,18 @@ export const AgentHealthSchema = z.object({
   avgScore: z.number().min(0).max(100),
   failureRate: z.number().min(0).max(1),
   openUseActions: z.number().int().nonnegative(),
+  /**
+   * Mean Flow adherence (flowAlignment.conformanceScore, 0–100) over the agent's
+   * scored calls; null when no call carries a flow alignment. Powers the roster's
+   * Flow adherence column (P11).
+   */
+  avgConformance: z.number().min(0).max(100).nullable(),
+  /**
+   * True Criteria met rate (0–1): share of perCriterion.met across the agent's
+   * analyses. NOT avgScore — this is the success-criteria pass rate for the donut
+   * (P01/BF-02); null when the agent has no analyzed calls.
+   */
+  criteriaMetRate: z.number().min(0).max(1).nullable(),
   lastAnalyzedAt: z.string().optional()
 })
 export type AgentHealth = z.infer<typeof AgentHealthSchema>

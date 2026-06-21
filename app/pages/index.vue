@@ -52,13 +52,17 @@ function fmtPct(n: number | undefined): string {
 
 /** Fleet-health band drives the one accent/status tint on the KPI row. */
 const healthTone = computed<Tone>(() => scoreToneName(fleet.value?.fleetHealth))
-const healthDelta = computed(() => {
-  const t = fleet.value?.trend ?? []
-  if (t.length < 2) return 'No trend yet'
-  const delta = Math.round((t.at(-1)!.score) - (t.at(-2)!.score))
-  if (delta === 0) return 'Flat vs. yesterday'
-  return `${delta > 0 ? '+' : ''}${delta} vs. yesterday`
-})
+/**
+ * Honest Fleet-health subtitle (P02 / LOCKED LEXICON). The previous
+ * `trend.at(-1) - trend.at(-2)` "vs. yesterday" delta was fabricated: the trend
+ * buckets omit days with no analyzed call, so the last two points are not
+ * guaranteed to be adjacent or recent calendar days — the KPI a reviewer reads
+ * first asserted an alarming day-over-day drop that the data doesn't support.
+ * We drop the synthetic delta and instead define what the metric IS: the
+ * average Call score across agents. The dedicated trend strip below carries the
+ * real series; a true delta returns only when consecutive recent days exist.
+ */
+const healthSubtitle = 'Average call score across agents'
 
 /** Failure rate above 20% is a warning band; the KPI tints only then. */
 const failureTone = computed<Tone>(() => ((fleet.value?.failureRate ?? 0) > 0.2 ? 'warning' : 'neutral'))
@@ -183,7 +187,7 @@ const useActionDelta = computed(() =>
           :icon="Activity"
           :tone="healthTone"
           :spark="sparkScores"
-          :delta="healthDelta"
+          :delta="healthSubtitle"
         />
         <KpiCard
           label="Calls analyzed"
@@ -223,18 +227,29 @@ const useActionDelta = computed(() =>
       <div class="grid items-start gap-6 lg:grid-cols-5">
         <!-- Agents preview (top-N) -->
         <section class="flex flex-col gap-3 lg:col-span-3">
-          <div class="flex items-center justify-between gap-3">
-            <div class="flex items-baseline gap-2">
-              <h2 class="text-[18px] font-semibold leading-tight tracking-tight">
-                Agents
-              </h2>
-              <span class="text-sm text-muted-foreground tabular-nums">
-                {{ agentCount }} monitored
-              </span>
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0 space-y-1">
+              <div class="flex items-baseline gap-2">
+                <h2 class="text-[18px] font-semibold leading-tight tracking-tight">
+                  Agents
+                </h2>
+                <span class="text-sm text-muted-foreground tabular-nums">
+                  {{ agentCount }} monitored
+                </span>
+              </div>
+              <!--
+                Define the signature axis on first use (P02 / LOCKED LEXICON).
+                Flow adherence = how closely a call followed its expected flow;
+                Call score = the overall weighted QA score of a call. This is the
+                only cross-agent comparison surface, so it names both axes once.
+              -->
+              <p class="text-[12px] text-muted-foreground">
+                Compared on Call score and Flow adherence — how closely each agent's calls followed their expected flow.
+              </p>
             </div>
             <NuxtLink
               to="/agents"
-              class="inline-flex items-center gap-1 rounded-md text-sm font-medium text-primary hover:underline focus-visible:outline-2 focus-visible:outline-primary"
+              class="inline-flex shrink-0 items-center gap-1 rounded-md text-sm font-medium text-primary hover:underline focus-visible:outline-2 focus-visible:outline-primary"
             >
               View all
               <ArrowRight class="size-3.5" />

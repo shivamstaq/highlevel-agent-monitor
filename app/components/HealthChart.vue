@@ -1,8 +1,21 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { VisArea, VisAxis, VisCrosshair, VisLine, VisTooltip, VisXYContainer } from '@unovis/vue'
 
 interface Point { date: string, score: number }
+
+/**
+ * Unovis' XY container can mount during Nuxt hydration before the flex/grid
+ * parent has resolved its width, leaving the SVG sized but empty (no marks/ticks
+ * ever drawn). Gate the chart behind a client-only mount + a resize nudge so it
+ * first renders once the container has a real width.
+ */
+const mounted = ref(false)
+onMounted(async () => {
+  mounted.value = true
+  await nextTick()
+  window.dispatchEvent(new Event('resize'))
+})
 
 const props = withDefaults(defineProps<{
   trend: Point[]
@@ -49,7 +62,8 @@ const tooltipTemplate = (d: { date: string, score: number }) =>
     :style="{ height: `${height}px` }"
   >
     <VisXYContainer
-      v-if="data.length"
+      v-if="data.length && mounted"
+      :key="data.length"
       :data="data"
       :height="height"
       :margin="{ top: 12, right: 12, bottom: 28, left: 32 }"
@@ -89,7 +103,7 @@ const tooltipTemplate = (d: { date: string, score: number }) =>
     </VisXYContainer>
 
     <div
-      v-else
+      v-else-if="mounted && !data.length"
       class="flex h-full items-center justify-center text-sm text-muted-foreground"
     >
       No analysis history yet.

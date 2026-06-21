@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch, watchEffect } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import {
   CheckCircle2,
   Cpu,
@@ -9,6 +9,7 @@ import {
   Loader2,
   MapPin,
   RefreshCw,
+  RotateCw,
   Sparkles,
   User
 } from 'lucide-vue-next'
@@ -63,6 +64,65 @@ watch(
 )
 
 const connected = computed(() => Boolean(locationId.value))
+
+/* ----------------------------------------------------------------------------
+ * Resolve the "Checking" state — never leave an unlabeled spinner forever (P23).
+ *
+ * `ready` from the bridge flips true once the iframe handshake answers OR its
+ * internal fallback fires. We add a SHORTER page-level safety timeout so the
+ * chip resolves to a clear, actionable state even if the parent never replies
+ * (the common standalone / mis-embedded case). Optimistic: the instant a
+ * locationId appears (URL param or handshake), we treat the session as resolved
+ * and stop showing the spinner — a known location IS a connection.
+ *
+ * `resolved` = the bridge reported in, OR we already have a location, OR our own
+ * timeout elapsed. Until then we show a LABELED "Resolving…" state, not a bare
+ * spinner. "Retry connection" re-posts the handshake without a full reload.
+ */
+const RESOLVE_TIMEOUT_MS = 1200
+const timedOut = ref(false)
+let resolveTimer: ReturnType<typeof setTimeout> | null = null
+
+function startResolveTimer() {
+  timedOut.value = false
+  if (resolveTimer) clearTimeout(resolveTimer)
+  resolveTimer = setTimeout(() => {
+    timedOut.value = true
+  }, RESOLVE_TIMEOUT_MS)
+}
+
+onMounted(startResolveTimer)
+onBeforeUnmount(() => {
+  if (resolveTimer) clearTimeout(resolveTimer)
+})
+
+/** True once we can stop showing the spinner (bridge in, location known, or timed out). */
+const resolved = computed(() => ready.value || connected.value || timedOut.value)
+
+/** Connection chip state machine: one of resolving | connected | disconnected. */
+const connectionState = computed<'resolving' | 'connected' | 'disconnected'>(() => {
+  if (connected.value) return 'connected'
+  if (!resolved.value) return 'resolving'
+  return 'disconnected'
+})
+
+/**
+ * Retry the handshake. We re-post REQUEST_USER_DATA to the parent (if embedded)
+ * and restart our own resolve window, so a transient miss can recover without a
+ * full page reload. Optimistic + bounded — the chip returns to "Resolving…" and
+ * then settles again.
+ */
+const retrying = ref(false)
+function retryConnection() {
+  retrying.value = true
+  startResolveTimer()
+  if (typeof window !== 'undefined' && window.parent && window.parent !== window) {
+    window.parent.postMessage({ message: 'REQUEST_USER_DATA' }, '*')
+  }
+  setTimeout(() => {
+    retrying.value = false
+  }, RESOLVE_TIMEOUT_MS)
+}
 
 const resolvedUserName = computed(() => context.value?.userName)
 const resolvedEmail = computed(() => context.value?.email ?? email.value ?? undefined)
@@ -157,14 +217,14 @@ async function loadDemo() {
     >
       <template #actions>
         <span
-          v-if="!ready"
+          v-if="connectionState === 'resolving'"
           class="inline-flex items-center gap-1.5 rounded-full bg-muted px-2.5 py-1 text-[12px] font-medium text-muted-foreground"
         >
           <Loader2 class="size-3.5 motion-safe:animate-spin" />
-          Checking
+          Resolving session…
         </span>
         <span
-          v-else-if="connected"
+          v-else-if="connectionState === 'connected'"
           class="inline-flex items-center gap-1.5 rounded-full bg-success-soft px-2.5 py-1 text-[12px] font-medium text-success"
         >
           <Link2 class="size-3.5" />
@@ -172,7 +232,7 @@ async function loadDemo() {
         </span>
         <span
           v-else
-          class="inline-flex items-center gap-1.5 rounded-full bg-warning-soft px-2.5 py-1 text-[12px] font-medium text-warning"
+          class="inline-flex items-center gap-1.5 rounded-full bg-warning-soft px-2.5 py-1 text-[12px] font-medium text-warning-foreground"
         >
           <Link2Off class="size-3.5" />
           Not connected
@@ -191,14 +251,14 @@ async function loadDemo() {
             {{ locationId }}
           </dd>
           <dd
-            v-else-if="ready"
+            v-else-if="resolved"
             class="text-sm text-muted-foreground"
           >
             Not resolved
           </dd>
           <dd
             v-else
-            class="h-5 w-40 animate-pulse rounded bg-muted"
+            class="h-5 w-40 motion-safe:animate-pulse rounded bg-muted"
             aria-hidden="true"
           />
         </div>
@@ -224,25 +284,54 @@ async function loadDemo() {
             </p>
           </dd>
           <dd
-            v-else-if="ready"
+            v-else-if="resolved"
             class="text-sm text-muted-foreground"
           >
             Not resolved
           </dd>
           <dd
             v-else
-            class="h-5 w-32 animate-pulse rounded bg-muted"
+            class="h-5 w-32 motion-safe:animate-pulse rounded bg-muted"
             aria-hidden="true"
           />
         </div>
       </dl>
 
+      <!-- Resolving: labeled progress, never a bare unexplained spinner (P23). -->
       <p
-        v-if="ready && !connected"
-        class="mt-4 rounded-md bg-muted/60 px-3 py-2 text-[12px] leading-relaxed text-muted-foreground"
+        v-if="connectionState === 'resolving'"
+        class="mt-4 flex items-center gap-2 rounded-md bg-muted/60 px-3 py-2 text-[12px] leading-relaxed text-muted-foreground"
       >
-        Open this app from inside your HighLevel location to resolve the connection. Running it standalone leaves the location unscoped.
+        <Loader2 class="size-3.5 shrink-0 motion-safe:animate-spin" />
+        Resolving your HighLevel session…
       </p>
+
+      <!-- Disconnected: a clear, actionable resolution — not an endless spinner. -->
+      <div
+        v-else-if="connectionState === 'disconnected'"
+        class="mt-4 flex flex-col gap-3 rounded-md bg-warning-soft px-3 py-3"
+      >
+        <p class="flex items-start gap-2 text-[12px] leading-relaxed text-warning-foreground">
+          <Link2Off class="mt-0.5 size-3.5 shrink-0" />
+          <span>
+            <span class="font-medium">Not connected — open inside HighLevel.</span>
+            Launch this app from your HighLevel location so it can resolve which location and user it's scoped to. Running it standalone leaves the location unscoped.
+          </span>
+        </p>
+        <Button
+          variant="outline"
+          size="sm"
+          class="self-start"
+          :disabled="retrying"
+          @click="retryConnection"
+        >
+          <component
+            :is="retrying ? Loader2 : RotateCw"
+            :class="['size-4', retrying && 'motion-safe:animate-spin']"
+          />
+          {{ retrying ? 'Retrying…' : 'Retry connection' }}
+        </Button>
+      </div>
     </SectionCard>
 
     <!-- Analysis model -->
@@ -261,15 +350,15 @@ async function loadDemo() {
         </div>
         <div class="flex flex-col gap-1">
           <dt class="flex items-center gap-1.5 text-[12px] font-medium text-muted-foreground">
-            <CheckCircle2 class="size-3.5" /> Scoring
+            <CheckCircle2 class="size-3.5" /> Scoring model
           </dt>
-          <dd class="text-sm">
-            Configured by your workspace
+          <dd class="text-sm font-medium">
+            Managed model — set by your admin
           </dd>
         </div>
       </dl>
       <p class="mt-4 text-[12px] leading-relaxed text-muted-foreground">
-        The provider and model are set in the server environment so API keys never reach the browser. Ask your workspace admin to change which model scores calls.
+        The provider and model that score your calls are configured server-side so API keys never reach the browser. Ask your workspace admin to change which model scores calls.
       </p>
     </SectionCard>
 

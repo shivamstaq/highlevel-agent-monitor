@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { Recommendation, RecommendationItem } from '#shared/types'
 import { computed, ref } from 'vue'
-import { ArrowUpRight, Check, Copy, FileText, GraduationCap, Phone, Settings2, SlidersHorizontal, User } from 'lucide-vue-next'
+import { ArrowUpRight, Check, Copy, FileText, GraduationCap, Phone, Repeat2, Settings2, SlidersHorizontal, User } from 'lucide-vue-next'
 import SectionCard from '~/components/SectionCard.vue'
 import { Badge } from '~/components/ui/badge'
 import { Button } from '~/components/ui/button'
@@ -54,6 +54,25 @@ const targetMeta = computed(() => {
 })
 
 const hasSource = computed(() => Boolean(callId.value || agentId.value))
+
+/**
+ * Recurrence chip (P10): the rollup deduped this same advice across calls and
+ * agents — surface the bucket size so a systemic multi-agent script bug reads
+ * differently from a one-off. Only meaningful when the source is an item that
+ * actually carries the counts and the advice recurs (callCount > 1).
+ */
+const callCount = computed(() => props.item?.callCount ?? 0)
+const agentCount = computed(() => props.item?.agentCount ?? 0)
+const recurs = computed(() => callCount.value > 1)
+const agentNames = computed(() => props.item?.agentNames ?? [])
+const recurrenceLabel = computed(() => {
+  const calls = `${callCount.value} call${callCount.value === 1 ? '' : 's'}`
+  // agentCount can be 0 if the rollup didn't populate it; fall back to calls only.
+  if (agentCount.value > 1) {
+    return `Seen on ${calls}, ${agentCount.value} agents`
+  }
+  return `Seen on ${calls}`
+})
 
 const copied = ref(false)
 const copyStatus = ref('')
@@ -141,11 +160,20 @@ async function copy() {
         {{ copyStatus }}
       </p>
 
-      <!-- Deep-links to the source call / agent (W09). -->
+      <!-- Recurrence chip (P10) + deep-links to the source call / agent (W09). -->
       <div
-        v-if="hasSource"
+        v-if="hasSource || recurs"
         class="flex flex-wrap items-center gap-x-4 gap-y-1 border-t pt-3"
       >
+        <Badge
+          v-if="recurs"
+          variant="secondary"
+          class="gap-1 rounded-full border-transparent bg-muted text-[12px] font-medium text-muted-foreground"
+          :title="agentNames.length ? `Raised by ${agentNames.join(', ')}` : undefined"
+        >
+          <Repeat2 class="size-3" />
+          {{ recurrenceLabel }}
+        </Badge>
         <NuxtLink
           v-if="callId"
           :to="`/calls/${callId}`"

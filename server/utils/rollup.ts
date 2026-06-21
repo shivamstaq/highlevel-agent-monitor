@@ -89,6 +89,26 @@ export function computeAgentHealth(
   const failureRate = callsAnalyzed ? failures / callsAnalyzed : 0
   const openUseActions = analyzed.reduce((sum, a) => sum + a.useActions.length, 0)
 
+  // Flow adherence: mean conformanceScore over the calls that carry a flow
+  // alignment. Stays null when none are scored so the UI can show "—" rather
+  // than a fabricated 0 (P11).
+  const scoredForFlow = analyzed.filter(a => a.flowAlignment)
+  const avgConformance = scoredForFlow.length
+    ? round1(scoredForFlow.reduce((sum, a) => sum + a.flowAlignment!.conformanceScore, 0) / scoredForFlow.length)
+    : null
+
+  // Criteria met: TRUE share of success criteria met across all per-criterion
+  // results (NOT avgScore). null when there are no analyzed criteria (BF-02/P01).
+  let criteriaTotal = 0
+  let criteriaMet = 0
+  for (const a of analyzed) {
+    for (const cs of a.scorecard.perCriterion) {
+      criteriaTotal += 1
+      if (cs.met) criteriaMet += 1
+    }
+  }
+  const criteriaMetRate = criteriaTotal ? round3(criteriaMet / criteriaTotal) : null
+
   let lastAnalyzedAt: string | undefined
   for (const a of analyzed) {
     if (!lastAnalyzedAt || a.createdAt > lastAnalyzedAt) lastAnalyzedAt = a.createdAt
@@ -100,6 +120,8 @@ export function computeAgentHealth(
     avgScore: round1(avgScore),
     failureRate: round3(failureRate),
     openUseActions,
+    avgConformance,
+    criteriaMetRate,
     ...(lastAnalyzedAt ? { lastAnalyzedAt } : {})
   }
 }
@@ -135,6 +157,8 @@ export function topRecommendations(
     rec: Recommendation
     count: number
     findingIds: Set<string>
+    /** Distinct agents that raised this advice — drives agentCount/agentNames (P10). */
+    agentIds: Set<string>
     /** The analysis whose call best represents this advice (source for deep-link). */
     sourceAnalysis: Analysis
     sourceImpact: Severity
@@ -147,6 +171,7 @@ export function topRecommendations(
       const existing = byKey.get(key)
       if (existing) {
         existing.count += 1
+        existing.agentIds.add(analysis.agentId)
         for (const fid of rec.findingIds) existing.findingIds.add(fid)
         // Keep the strongest impact seen for this advice.
         if (SEVERITY_RANK[rec.impact] > SEVERITY_RANK[existing.rec.impact]) {
@@ -166,6 +191,7 @@ export function topRecommendations(
           rec,
           count: 1,
           findingIds: new Set(rec.findingIds),
+          agentIds: new Set([analysis.agentId]),
           sourceAnalysis: analysis,
           sourceImpact: rec.impact
         })
@@ -180,8 +206,13 @@ export function topRecommendations(
       return b.count - a.count
     })
     .slice(0, limit)
-    .map(({ rec, findingIds, sourceAnalysis }) =>
-      toRecommendationItem({ ...rec, findingIds: [...findingIds] }, sourceAnalysis, sources)
+    .map(({ rec, findingIds, count, agentIds, sourceAnalysis }) =>
+      toRecommendationItem(
+        { ...rec, findingIds: [...findingIds] },
+        sourceAnalysis,
+        sources,
+        { callCount: count, agentIds }
+      )
     )
 }
 
@@ -190,14 +221,28 @@ function analysisCallTime(analysis: Analysis, sources: RecommendationSources = {
   return sources.callsById?.get(analysis.callId)?.startedAt ?? analysis.createdAt
 }
 
+/** Recurrence counts carried from the dedup bucket (P10). */
+interface RecommendationRecurrence {
+  callCount: number
+  agentIds: Set<string>
+}
+
 /** Tag one recommendation with the call/agent that raised it for deep-linking. */
 function toRecommendationItem(
   recommendation: Recommendation,
   analysis: Analysis,
-  sources: RecommendationSources
+  sources: RecommendationSources,
+  recurrence: RecommendationRecurrence
 ): RecommendationItem {
   const agent = sources.agentsById?.get(analysis.agentId)
   const call = sources.callsById?.get(analysis.callId)
+
+  // Resolve the distinct agents that raised this advice into display names so the
+  // card can show "across N agents" with the actual names (falls back to the id).
+  const agentNames = [...recurrence.agentIds].map(
+    id => sources.agentsById?.get(id)?.name ?? id
+  )
+
   return {
     recommendation,
     callId: analysis.callId,
@@ -205,7 +250,10 @@ function toRecommendationItem(
     agentName: agent?.name ?? analysis.agentId,
     ...(call?.contactName ? { contactName: call.contactName } : {}),
     callScore: analysis.scorecard.overall,
-    ...(call?.startedAt ? { callStartedAt: call.startedAt } : {})
+    ...(call?.startedAt ? { callStartedAt: call.startedAt } : {}),
+    callCount: recurrence.callCount,
+    agentCount: recurrence.agentIds.size,
+    ...(agentNames.length ? { agentNames } : {})
   }
 }
 

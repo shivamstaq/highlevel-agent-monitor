@@ -40,42 +40,54 @@ const sorted = computed(() => props.useActions)
 <template>
   <div
     v-if="useActions.length"
-    class="flex flex-col gap-2"
+    class="flex flex-col gap-3"
   >
-    <button
-      v-for="ua in sorted"
-      :key="ua.id"
-      type="button"
-      :aria-pressed="isActive(ua)"
-      :class="cn(
-        'group flex items-start gap-3 rounded-md border bg-card p-3 text-left outline-none transition-colors duration-[var(--dur)] ease-[var(--ease)] hover:border-foreground/20 hover:bg-accent/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary',
-        isActive(ua) && 'border-primary/60 ring-1 ring-primary/40'
-      )"
-      @click="$emit('focus', ua.turnRange)"
-    >
-      <span
+    <!--
+      First-use inline definition of the coined term "Use Actions" (P16).
+      Defines what a use-action IS before the list, so a first-time operator
+      isn't dropped straight into a worklist of un-glossed jargon.
+    -->
+    <p class="text-[12px] leading-relaxed text-muted-foreground">
+      <span class="font-medium text-foreground">Use Actions</span> are specific call
+      segments that need a human — for review, coaching, or script training.
+    </p>
+
+    <div class="flex flex-col gap-2">
+      <button
+        v-for="ua in sorted"
+        :key="ua.id"
+        type="button"
+        :aria-pressed="isActive(ua)"
         :class="cn(
-          'mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md',
-          kindMeta[ua.recommendedAction].tone.badge
+          'group flex items-start gap-3 rounded-md border bg-card p-3 text-left outline-none transition-colors duration-[var(--dur)] ease-[var(--ease)] hover:border-foreground/20 hover:bg-accent/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary',
+          isActive(ua) && 'border-primary/60 ring-1 ring-primary/40'
         )"
+        @click="$emit('focus', ua.turnRange)"
       >
-        <component
-          :is="kindMeta[ua.recommendedAction].icon"
-          class="size-3.5"
-        />
-      </span>
-      <div class="flex min-w-0 flex-col gap-1">
-        <div class="flex items-center gap-2">
-          <span class="text-sm font-semibold">{{ kindMeta[ua.recommendedAction].label }}</span>
-          <span class="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-muted-foreground">
-            turns {{ ua.turnRange[0] }}&ndash;{{ ua.turnRange[1] }}
-          </span>
+        <span
+          :class="cn(
+            'mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md',
+            kindMeta[ua.recommendedAction].tone.badge
+          )"
+        >
+          <component
+            :is="kindMeta[ua.recommendedAction].icon"
+            class="size-3.5"
+          />
+        </span>
+        <div class="flex min-w-0 flex-col gap-1">
+          <div class="flex items-center gap-2">
+            <span class="text-sm font-semibold">{{ kindMeta[ua.recommendedAction].label }}</span>
+            <span class="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-muted-foreground">
+              turns {{ ua.turnRange[0] }}&ndash;{{ ua.turnRange[1] }}
+            </span>
+          </div>
+          <p class="text-sm leading-snug text-muted-foreground">
+            {{ ua.reason }}
+          </p>
         </div>
-        <p class="text-sm leading-snug text-muted-foreground">
-          {{ ua.reason }}
-        </p>
-      </div>
-    </button>
+      </button>
+    </div>
   </div>
   <div
     v-else

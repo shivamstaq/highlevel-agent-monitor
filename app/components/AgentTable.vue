@@ -25,9 +25,9 @@ const props = defineProps<{
   agents: AgentHealth[]
 }>()
 
-const { scoreToneSet, scoreBandLabel, toneClasses } = useTone()
+const { scoreToneSet, scoreToneName, scoreBandLabel, toneClasses } = useTone()
 
-type SortKey = 'name' | 'avgScore' | 'failureRate' | 'openUseActions'
+type SortKey = 'name' | 'avgScore' | 'avgConformance' | 'failureRate' | 'openUseActions'
 const sortKey = ref<SortKey>('avgScore')
 const sortAsc = ref(false)
 
@@ -54,6 +54,10 @@ const rows = computed(() => {
     if (sortKey.value === 'name') {
       av = a.agent.name.toLowerCase()
       bv = b.agent.name.toLowerCase()
+    } else if (sortKey.value === 'avgConformance') {
+      // null Flow adherence (no flow baseline) sorts below any real value.
+      av = a.avgConformance ?? -1
+      bv = b.avgConformance ?? -1
     } else {
       av = a[sortKey.value]
       bv = b[sortKey.value]
@@ -76,7 +80,17 @@ function failureClass(rate: number): string {
 
 <template>
   <div class="overflow-hidden rounded-xl border">
-    <Table>
+    <Table fixed>
+      <colgroup>
+        <!-- Agent (text, flexes) · Status · Avg score · Flow adherence · Failures · Use actions · chevron -->
+        <col class="w-[34%] min-w-[180px]">
+        <col class="w-[96px]">
+        <col class="w-[168px]">
+        <col class="w-[148px]">
+        <col class="w-[88px]">
+        <col class="w-[104px]">
+        <col class="w-8">
+      </colgroup>
       <TableHeader>
         <TableRow class="bg-muted/40 hover:bg-muted/40">
           <TableHead :aria-sort="ariaSort('name')">
@@ -106,10 +120,7 @@ function failureClass(rate: number): string {
 
           <TableHead>Status</TableHead>
 
-          <TableHead
-            class="w-[200px]"
-            :aria-sort="ariaSort('avgScore')"
-          >
+          <TableHead :aria-sort="ariaSort('avgScore')">
             <button
               type="button"
               class="flex items-center gap-1 rounded-md font-medium focus-visible:outline-2 focus-visible:outline-primary"
@@ -122,6 +133,29 @@ function failureClass(rate: number): string {
               />
               <ArrowDown
                 v-else-if="sortKey === 'avgScore'"
+                class="size-3 text-primary"
+              />
+              <ArrowDownUp
+                v-else
+                class="size-3 text-muted-foreground"
+              />
+            </button>
+          </TableHead>
+
+          <TableHead :aria-sort="ariaSort('avgConformance')">
+            <button
+              type="button"
+              class="flex items-center gap-1 rounded-md font-medium focus-visible:outline-2 focus-visible:outline-primary"
+              :title="'Flow adherence: how closely each agent\'s calls followed their expected flow.'"
+              @click="toggleSort('avgConformance')"
+            >
+              Flow adherence
+              <ArrowUp
+                v-if="sortKey === 'avgConformance' && sortAsc"
+                class="size-3 text-primary"
+              />
+              <ArrowDown
+                v-else-if="sortKey === 'avgConformance'"
                 class="size-3 text-primary"
               />
               <ArrowDownUp
@@ -256,6 +290,40 @@ function failureClass(rate: number): string {
             </div>
           </TableCell>
 
+          <TableCell>
+            <div
+              v-if="row.avgConformance != null"
+              class="flex items-center gap-2"
+            >
+              <div
+                class="h-1.5 w-full overflow-hidden rounded-full"
+                :class="toneClasses(scoreToneName(row.avgConformance)).bg"
+                role="progressbar"
+                :aria-valuenow="Math.round(row.avgConformance)"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                :aria-label="`Flow adherence for ${row.agent.name}`"
+              >
+                <div
+                  class="h-full rounded-full"
+                  :class="toneClasses(scoreToneName(row.avgConformance)).dot"
+                  :style="`width: ${Math.max(2, Math.round(row.avgConformance))}%`"
+                />
+              </div>
+              <span
+                class="w-9 shrink-0 text-right text-sm font-semibold tabular-nums"
+                :class="toneClasses(scoreToneName(row.avgConformance)).text"
+              >
+                {{ Math.round(row.avgConformance) }}
+              </span>
+            </div>
+            <span
+              v-else
+              class="text-sm text-muted-foreground"
+              title="No flow baseline for this agent's calls yet."
+            >—</span>
+          </TableCell>
+
           <TableCell class="text-right tabular-nums">
             <span :class="cn('text-sm', row.failureRate > 0 ? cn('font-medium', failureClass(row.failureRate)) : 'text-muted-foreground')">
               {{ Math.round(row.failureRate * 100) }}%
@@ -282,7 +350,7 @@ function failureClass(rate: number): string {
 
         <TableRow v-if="!rows.length">
           <TableCell
-            :colspan="6"
+            :colspan="7"
             class="h-32 text-center text-sm text-muted-foreground"
           >
             No agents to show yet.

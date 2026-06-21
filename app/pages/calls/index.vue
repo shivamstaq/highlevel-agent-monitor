@@ -25,6 +25,7 @@ import {
 } from '~/components/ui/select'
 import { useApi } from '~/composables/useApi'
 import { useBreadcrumb } from '~/composables/useBreadcrumb'
+import { humanizeOutcome } from '~/lib/format'
 
 /**
  * /calls — the Calls inbox (W02). The QA operator's daily triage queue.
@@ -97,7 +98,11 @@ const agentOptions = computed(() =>
     .sort((a, b) => a.name.localeCompare(b.name))
 )
 
-/** Distinct outcomes present in the unfiltered-by-outcome result, for the dropdown. */
+/**
+ * Distinct outcomes present in the unfiltered-by-outcome result, for the
+ * dropdown. The raw snake_case token stays the filter KEY (URL value) while the
+ * humanized copy is the visible LABEL, sorted by that label (P08).
+ */
 const outcomeOptions = computed(() => {
   const set = new Set<string>()
   for (const item of calls.value ?? []) {
@@ -106,7 +111,9 @@ const outcomeOptions = computed(() => {
   }
   // Keep the active outcome selectable even if filtering hid every other row.
   if (outcome.value) set.add(outcome.value)
-  return [...set].sort((a, b) => a.localeCompare(b))
+  return [...set]
+    .map(value => ({ value, label: humanizeOutcome(value) }))
+    .sort((a, b) => a.label.localeCompare(b.label))
 })
 
 const severityOptions: { value: Severity, label: string }[] = [
@@ -285,10 +292,10 @@ useHead({ title: computed(() => (activeAgentName.value ? `Calls · ${activeAgent
             </SelectItem>
             <SelectItem
               v-for="opt in outcomeOptions"
-              :key="opt"
-              :value="opt"
+              :key="opt.value"
+              :value="opt.value"
             >
-              {{ opt }}
+              {{ opt.label }}
             </SelectItem>
           </SelectContent>
         </Select>

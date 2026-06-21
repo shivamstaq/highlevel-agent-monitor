@@ -27,7 +27,10 @@ import { cn } from '~/lib/utils'
  *     listening lanes (STT/VAD). They recede.
  *   · Cost lanes (EOU / LLM / TTS) + interruptions carry the only saturated
  *     ink, routed through the --warning / --danger semantic tokens, so the eye
- *     lands on the stages that actually cost time.
+ *     lands on the stages that actually cost time. P30: a cost segment is toned
+ *     by its OWN latencyMs vs its modeled budget — within budget = muted warning,
+ *     over budget = saturated danger — so saturation tracks the real spend on
+ *     THIS call, not a static per-stage hue.
  *
  * All status color routes through tokens (no raw emerald-/amber-/red utilities).
  * Motion is gated behind motion-safe + the global prefers-reduced-motion rule.
@@ -35,6 +38,13 @@ import { cn } from '~/lib/utils'
 const props = defineProps<{
   timeline: CallTimeline
   activeTurnIdx?: number | null
+  /**
+   * The call's TRUE wall-clock duration (Call.durationSec). The modeled timeline
+   * is rescaled server-side so totalMs ≈ durationSec*1000, but the "Pipeline span"
+   * KPI renders this real value formatted exactly like the call header (m:ss) so
+   * the two never contradict (P05). Optional: falls back to totalMs when absent.
+   */
+  durationSec?: number
 }>()
 
 const emit = defineEmits<{
@@ -69,9 +79,10 @@ const LANES: LaneDef[] = [
   { stage: 'user_speech', label: 'Caller', fill: 'var(--cl-neutral)', lane: 'var(--cl-neutral-soft)', cost: false },
   { stage: 'stt', label: 'STT', fill: 'var(--cl-listen)', lane: 'var(--cl-listen-soft)', cost: false },
   { stage: 'vad', label: 'VAD', fill: 'var(--cl-listen)', lane: 'var(--cl-listen-soft)', cost: false },
-  // Cost lanes: saturated semantic ink — this is where latency is spent.
+  // Cost lanes: lane bg is faint warning; the SEGMENT fill is resolved per event
+  // from latency-vs-budget (segFill), so saturation tracks real spend not stage.
   { stage: 'eou', label: 'Endpoint (EOU)', fill: 'var(--cl-warning)', lane: 'var(--cl-warning-soft)', cost: true },
-  { stage: 'llm', label: 'LLM', fill: 'var(--cl-danger)', lane: 'var(--cl-danger-soft)', cost: true },
+  { stage: 'llm', label: 'LLM', fill: 'var(--cl-warning)', lane: 'var(--cl-warning-soft)', cost: true },
   { stage: 'tts', label: 'TTS', fill: 'var(--cl-warning)', lane: 'var(--cl-warning-soft)', cost: true },
   // Agent speech = neutral again (the output, not a cost).
   { stage: 'agent_speech', label: 'Agent', fill: 'var(--cl-neutral)', lane: 'var(--cl-neutral-soft)', cost: false }
@@ -88,11 +99,33 @@ const chartVars = {
   '--cl-listen-soft': 'color-mix(in oklch, var(--primary) 7%, transparent)',
   '--cl-warning': 'var(--warning)',
   '--cl-warning-soft': 'color-mix(in oklch, var(--warning) 10%, transparent)',
+  // Cost segment WITHIN budget: low-chroma warning (recedes, but still a cost cue).
+  '--cl-cost-ok': 'color-mix(in oklch, var(--warning) 60%, var(--muted-foreground))',
   '--cl-danger': 'var(--danger)',
   '--cl-danger-soft': 'color-mix(in oklch, var(--danger) 10%, transparent)'
 } as const
 
 const LANE_INDEX = new Map<string, number>(LANES.map((l, i) => [l.stage, i]))
+
+/* ----------------------------------------------------------------------------
+ * Per-cost-stage modeled budgets (LiveKit-published means, mirrored in the
+ * Modeled-timing popover). P30: cost-lane saturation is DATA-DRIVEN — a cost
+ * segment within its budget stays low-chroma warning; one OVER budget escalates
+ * to saturated danger ink. So color encodes "where THIS call spent time over its
+ * budget", not a static EOU=amber / LLM=red decoration-by-category.
+ * ------------------------------------------------------------------------- */
+const COST_BUDGET_MS: Partial<Record<LaneStage, number>> = {
+  eou: 550, // end-of-utterance turn detector
+  llm: 420, // LLM TTFT
+  tts: 180 // TTS TTFB
+}
+
+/** True when a cost segment's modeled latency exceeds its budget. */
+function isOverBudget(ev: CallEvent): boolean {
+  const budget = COST_BUDGET_MS[ev.stage as LaneStage]
+  if (budget == null || ev.latencyMs == null) return false
+  return ev.latencyMs > budget
+}
 
 /* ----------------------------------------------------------------------------
  * Geometry — SVG uses a viewBox so it scales fluidly. x maps to a fixed unit
@@ -161,9 +194,24 @@ interface Segment {
   w: number
   y: number
   active: boolean
+  /** Cost segment over its modeled budget — drives saturated danger fill (P30). */
+  over: boolean
+  /** Resolved segment fill: within-budget cost = muted warning; over = danger. */
+  fill: string
 }
 
 const MIN_SEG_W = 3 // logical units so a 0-width latency marker is still visible
+
+/**
+ * Per-segment fill (P30). Non-cost lanes keep their lane fill. Cost lanes are
+ * data-driven: within budget = a muted warning ink (low saturation, recedes),
+ * over budget = saturated danger ink — so the eye lands on the stages that
+ * actually overspent on THIS call.
+ */
+function segFill(ev: CallEvent, lane: LaneDef): string {
+  if (!lane.cost) return lane.fill
+  return isOverBudget(ev) ? 'var(--cl-danger)' : 'var(--cl-cost-ok)'
+}
 
 const segments = computed<Segment[]>(() => {
   const out: Segment[] = []
@@ -183,7 +231,9 @@ const segments = computed<Segment[]>(() => {
       active:
         props.activeTurnIdx != null
         && ev.turnIdx != null
-        && ev.turnIdx === props.activeTurnIdx
+        && ev.turnIdx === props.activeTurnIdx,
+      over: lane.cost && isOverBudget(ev),
+      fill: segFill(ev, lane)
     })
   }
   return out
@@ -208,21 +258,45 @@ const avgTone = computed(() => {
   return toneClasses('danger')
 })
 
-const totalSeconds = computed(() => (props.timeline.totalMs / 1000).toFixed(1))
+/**
+ * Pipeline span (P05). The modeled timeline is rescaled so totalMs ≈ the call's
+ * real durationSec*1000, but we render the call's TRUE durationSec (when passed)
+ * formatted as m:ss — IDENTICAL to the call header — so the showpiece never
+ * contradicts the header (no 46.0s-vs-4:18). Falls back to totalMs only when the
+ * host doesn't pass durationSec.
+ */
+const spanSec = computed(() =>
+  props.durationSec != null && props.durationSec > 0
+    ? props.durationSec
+    : props.timeline.totalMs / 1000
+)
 
-/** A small set of headline per-stage p50 chips, in a sensible reading order. */
+const spanLabel = computed(() => {
+  const total = Math.round(spanSec.value)
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return `${m}:${s.toString().padStart(2, '0')}`
+})
+
+/**
+ * Headline per-stage p50 chips — exactly the COST stages so "where time is
+ * spent" reads cleanly (P30). STT (a non-cost lane) is intentionally NOT a chip;
+ * the e2e chip closes the identity e2e ≈ EOU + TTFT + TTFB.
+ */
 const stageChips = computed(() => {
   const wanted: { stage: Stage, label: string }[] = [
-    { stage: 'stt', label: 'STT' },
     { stage: 'eou', label: 'EOU' },
     { stage: 'llm', label: 'LLM TTFT' },
     { stage: 'tts', label: 'TTS TTFB' }
   ]
   const byStage = new Map(props.timeline.perStageLatency.map(s => [s.stage, s]))
-  return wanted
+  const chips = wanted
     .map(w => ({ ...w, lat: byStage.get(w.stage) }))
     .filter(c => c.lat && c.lat.count > 0)
     .map(c => ({ label: c.label, p50: Math.round(c.lat!.p50Ms) }))
+  // e2e: the headline boundary metric (caller stops → agent speaks).
+  if (avgMs.value > 0) chips.push({ label: 'e2e', p50: avgMs.value })
+  return chips
 })
 
 const isModeled = computed(() => props.timeline.source === 'modeled')
@@ -247,7 +321,11 @@ function segLabel(s: Segment): string {
           : ev.stage === 'tts'
             ? 'TTFB'
             : ev.type
-    return `${lane} ${kind}: ${fmtDur(ev.latencyMs)}`
+    const budget = COST_BUDGET_MS[ev.stage as LaneStage]
+    const verdict = budget != null
+      ? ` (${s.over ? 'over' : 'within'} ${fmtDur(budget)} budget)`
+      : ''
+    return `${lane} ${kind}: ${fmtDur(ev.latencyMs)}${verdict}`
   }
   const dur = ev.tEndMs - ev.tStartMs
   const verb = ev.stage === 'user_speech' || ev.stage === 'agent_speech' ? 'speech' : ev.type
@@ -269,118 +347,131 @@ function onSegKey(e: KeyboardEvent, s: Segment) {
 </script>
 
 <template>
-  <div
-    class="flex flex-col gap-4"
-    :style="chartVars"
-  >
-    <!-- Honesty flag + KPI strip -->
-    <div class="flex flex-col gap-3">
-      <div class="flex items-center justify-end">
-        <!-- Modeled-timing honesty popover (credibility asset — kept) -->
-        <Popover v-if="isModeled">
-          <PopoverTrigger as-child>
-            <button
-              type="button"
-              class="cursor-help rounded-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
-            >
-              <Badge
-                variant="outline"
-                :class="cn('gap-1', toneClasses('warning').badge, 'border-warning/40')"
+  <TooltipProvider :delay-duration="80">
+    <div
+      class="flex flex-col gap-4"
+      :style="chartVars"
+    >
+      <!-- Honesty flag + KPI strip -->
+      <div class="flex flex-col gap-3">
+        <div class="flex items-center justify-end">
+          <!-- Modeled-timing honesty popover (credibility asset — kept) -->
+          <Popover v-if="isModeled">
+            <PopoverTrigger as-child>
+              <button
+                type="button"
+                class="cursor-help rounded-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
               >
-                <Info class="size-3" />
-                Modeled timing
-              </Badge>
-            </button>
-          </PopoverTrigger>
-          <PopoverContent
-            class="w-80 text-xs leading-relaxed"
-            align="end"
-          >
-            <p class="mb-2 text-sm font-semibold text-foreground">
-              Stage latencies are modeled, not measured.
-            </p>
-            <p class="text-muted-foreground">
-              HighLevel's Voice AI API does not expose per-stage latency. Stage
-              timings are modeled on published LiveKit budgets — end-of-utterance
-              <span class="font-medium text-foreground">~550ms</span> (turn
-              detector), LLM TTFT
-              <span class="font-medium text-foreground">~420ms</span>, TTS TTFB
-              <span class="font-medium text-foreground">~180ms</span>; identity
-              e2e &asymp; EOU + TTFT + TTFB, target &lt; 1s. Turn boundaries derive
-              from the transcript; deterministic per call.
-            </p>
-            <p class="mt-2 font-mono text-[11px] text-muted-foreground">
-              model {{ timeline.modelVersion }}
-            </p>
-          </PopoverContent>
-        </Popover>
-
-        <Badge
-          v-else
-          variant="outline"
-          :class="cn('gap-1', toneClasses('success').badge, 'border-success/40')"
-        >
-          <span class="size-1.5 rounded-full bg-success" />
-          Real timing (HighLevel)
-        </Badge>
-      </div>
-
-      <div class="flex flex-wrap items-stretch gap-2">
-        <!-- Headline: avg response latency -->
-        <div
-          class="flex min-w-[15rem] flex-1 flex-col gap-0.5 rounded-md border bg-card px-3 py-2"
-        >
-          <span class="flex items-center gap-1.5 text-[12px] font-medium text-muted-foreground">
-            <span :class="cn('size-1.5 rounded-full', avgTone.dot)" />
-            Avg response latency (EOU&rarr;first audio)
-          </span>
-          <div class="flex items-baseline gap-2">
-            <span :class="cn('text-2xl font-semibold tabular-nums', avgTone.text)">
-              {{ avgMs }}<span class="text-sm font-normal">ms</span>
-            </span>
-            <span class="text-[12px] text-muted-foreground">target &lt; 1000ms</span>
-          </div>
-        </div>
-
-        <div class="flex flex-col justify-center gap-0.5 rounded-md border bg-card px-3 py-2">
-          <span class="text-[12px] font-medium text-muted-foreground">Interruptions</span>
-          <span
-            :class="cn(
-              'text-2xl font-semibold tabular-nums',
-              timeline.interruptionCount > 0 ? toneClasses('danger').text : 'text-foreground'
-            )"
-          >{{ timeline.interruptionCount }}</span>
-        </div>
-
-        <div class="flex flex-col justify-center gap-0.5 rounded-md border bg-card px-3 py-2">
-          <span class="text-[12px] font-medium text-muted-foreground">Call duration</span>
-          <span class="text-2xl font-semibold tabular-nums text-foreground">
-            {{ totalSeconds }}<span class="text-sm font-normal">s</span>
-          </span>
-        </div>
-
-        <div
-          v-if="stageChips.length"
-          class="flex flex-1 flex-col justify-center gap-1 rounded-md border bg-card px-3 py-2"
-        >
-          <span class="text-[12px] font-medium text-muted-foreground">Per-stage p50</span>
-          <div class="flex flex-wrap gap-1.5">
-            <span
-              v-for="chip in stageChips"
-              :key="chip.label"
-              class="inline-flex items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 text-[12px] font-medium tabular-nums"
+                <Badge
+                  variant="outline"
+                  :class="cn('gap-1', toneClasses('warning').badge, 'border-warning/40')"
+                >
+                  <Info class="size-3" />
+                  Modeled timing
+                </Badge>
+              </button>
+            </PopoverTrigger>
+            <PopoverContent
+              class="w-80 text-xs leading-relaxed"
+              align="end"
             >
-              <span class="text-muted-foreground">{{ chip.label }}</span>
-              <span class="text-foreground">{{ chip.p50 }}ms</span>
+              <p class="mb-2 text-sm font-semibold text-foreground">
+                Stage latencies are modeled, not measured.
+              </p>
+              <p class="text-muted-foreground">
+                HighLevel's Voice AI API does not expose per-stage latency. Stage
+                timings are modeled on published LiveKit budgets — end-of-utterance
+                <span class="font-medium text-foreground">~550ms</span> (turn
+                detector), LLM TTFT
+                <span class="font-medium text-foreground">~420ms</span>, TTS TTFB
+                <span class="font-medium text-foreground">~180ms</span>; identity
+                e2e &asymp; EOU + TTFT + TTFB, target &lt; 1s. Turn boundaries derive
+                from the transcript; deterministic per call.
+              </p>
+              <p class="mt-2 font-mono text-[11px] text-muted-foreground">
+                model {{ timeline.modelVersion }}
+              </p>
+            </PopoverContent>
+          </Popover>
+
+          <Badge
+            v-else
+            variant="outline"
+            :class="cn('gap-1', toneClasses('success').badge, 'border-success/40')"
+          >
+            <span class="size-1.5 rounded-full bg-success" />
+            Real timing (HighLevel)
+          </Badge>
+        </div>
+
+        <div class="flex flex-wrap items-stretch gap-2">
+          <!-- Headline: response latency at the HONEST boundary (P06).
+             Labeled by what is actually measured (caller stops → agent speaks),
+             which spans VAD+EOU+TTFT+TTFB — not just EOU→first audio. -->
+          <div
+            class="flex min-w-[16rem] flex-1 flex-col gap-0.5 rounded-md border bg-card px-3 py-2"
+          >
+            <span class="flex items-center gap-1.5 text-[12px] font-medium text-muted-foreground">
+              <span :class="cn('size-1.5 rounded-full', avgTone.dot)" />
+              Response latency · caller stops to agent speaks
             </span>
+            <div class="flex items-baseline gap-2">
+              <span :class="cn('text-2xl font-semibold tabular-nums', avgTone.text)">
+                {{ avgMs }}<span class="text-sm font-normal">ms</span>
+              </span>
+              <span class="text-[12px] text-muted-foreground">reference &lt; 1000ms (LiveKit)</span>
+            </div>
+          </div>
+
+          <div class="flex flex-col justify-center gap-0.5 rounded-md border bg-card px-3 py-2">
+            <span class="text-[12px] font-medium text-muted-foreground">Interruptions</span>
+            <span
+              :class="cn(
+                'text-2xl font-semibold tabular-nums',
+                timeline.interruptionCount > 0 ? toneClasses('danger').text : 'text-foreground'
+              )"
+            >{{ timeline.interruptionCount }}</span>
+          </div>
+
+          <!-- Pipeline span (P05): the call's TRUE duration, formatted m:ss exactly
+             like the call header — never the raw collapsed modeled clock. -->
+          <Tooltip>
+            <TooltipTrigger as-child>
+              <div class="flex cursor-help flex-col justify-center gap-0.5 rounded-md border bg-card px-3 py-2">
+                <span class="text-[12px] font-medium text-muted-foreground">Pipeline span</span>
+                <span class="text-2xl font-semibold tabular-nums text-foreground">
+                  {{ spanLabel }}
+                </span>
+              </div>
+            </TooltipTrigger>
+            <TooltipContent class="max-w-xs text-xs leading-relaxed">
+              Matches the call's real duration. The modeled stage timings are
+              rescaled to fit this span (inter-turn silence is collapsed, then
+              stretched back), so the bars show proportion, not wall-clock offsets.
+            </TooltipContent>
+          </Tooltip>
+
+          <div
+            v-if="stageChips.length"
+            class="flex flex-1 flex-col justify-center gap-1 rounded-md border bg-card px-3 py-2"
+          >
+            <span class="text-[12px] font-medium text-muted-foreground">Per-stage p50</span>
+            <div class="flex flex-wrap gap-1.5">
+              <span
+                v-for="chip in stageChips"
+                :key="chip.label"
+                class="inline-flex items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 text-[12px] font-medium tabular-nums"
+              >
+                <span class="text-muted-foreground">{{ chip.label }}</span>
+                <span class="text-foreground">{{ chip.p50 }}ms</span>
+              </span>
+            </div>
           </div>
         </div>
       </div>
-    </div>
 
-    <!-- Gantt: single fluid SVG (lane-label gutter baked into the viewBox so
+      <!-- Gantt: single fluid SVG (lane-label gutter baked into the viewBox so
          rows stay pixel-aligned at every width; uniform scaling, no distortion). -->
-    <TooltipProvider :delay-duration="80">
       <div class="min-w-0">
         <svg
           :viewBox="`0 0 ${VB_W} ${VB_H}`"
@@ -472,18 +563,18 @@ function onSegKey(e: KeyboardEvent, s: Segment) {
                   @click="onSegClick(s)"
                   @keydown="onSegKey($event, s)"
                 >
-                  <!-- the bar -->
+                  <!-- the bar — cost segments tint by latency vs budget (P30) -->
                   <rect
                     :x="s.x"
                     :y="s.y + 5"
                     :width="s.w"
                     :height="LANE_H - 10"
                     :rx="s.lane.cost ? 3 : 5"
-                    :style="{ fill: s.lane.fill }"
+                    :style="{ fill: s.fill }"
                     stroke-width="1.5"
                     vector-effect="non-scaling-stroke"
                     :class="cn(
-                      s.lane.cost ? 'opacity-95' : 'opacity-70',
+                      s.lane.cost ? (s.over ? 'opacity-100' : 'opacity-80') : 'opacity-70',
                       'hover:opacity-100'
                     )"
                   />
@@ -500,9 +591,10 @@ function onSegKey(e: KeyboardEvent, s: Segment) {
                     stroke-width="2"
                     vector-effect="non-scaling-stroke"
                   />
-                  <!-- diagonal hatch on cost bars so they read as "cost" -->
+                  <!-- diagonal hatch ONLY on OVER-budget cost bars so the hatch
+                       marks real overspend, not stage identity (P30) -->
                   <rect
-                    v-if="s.lane.cost"
+                    v-if="s.over"
                     :x="s.x"
                     :y="s.y + 5"
                     :width="s.w"
@@ -595,41 +687,59 @@ function onSegKey(e: KeyboardEvent, s: Segment) {
           </defs>
         </svg>
       </div>
-    </TooltipProvider>
 
-    <!-- Legend — grouped so color reads as a key, not decoration -->
-    <div class="flex flex-wrap items-center gap-x-4 gap-y-2 border-t pt-3 text-[12px] text-muted-foreground">
-      <span class="font-medium text-foreground">Where time is spent</span>
-      <span class="inline-flex items-center gap-1.5">
-        <span
-          class="size-2.5 rounded-[3px]"
-          :style="{ backgroundColor: 'var(--cl-neutral)', opacity: 0.7 }"
-        />
-        Speech &amp; listening (caller · STT · VAD · agent)
-      </span>
-      <span class="inline-flex items-center gap-1.5">
-        <span class="relative size-2.5 overflow-hidden rounded-[3px]">
+      <!-- Legend — color is a KEY for where latency is spent, not decoration.
+         Cost lanes split by latency-vs-budget so saturation = real overspend. -->
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-2 border-t pt-3 text-[12px] text-muted-foreground">
+        <span class="font-medium text-foreground">Where time is spent</span>
+        <span class="inline-flex items-center gap-1.5">
           <span
-            class="absolute inset-0"
-            :style="{ backgroundColor: 'var(--cl-warning)' }"
+            class="size-2.5 rounded-[3px]"
+            :style="{ backgroundColor: 'var(--cl-neutral)', opacity: 0.7 }"
           />
-          <span class="absolute inset-0 bg-[repeating-linear-gradient(45deg,transparent,transparent_1.5px,rgba(255,255,255,0.5)_1.5px,rgba(255,255,255,0.5)_3px)]" />
+          Speech &amp; listening (caller · STT · VAD · agent)
         </span>
-        Cost stages — EOU · LLM · TTS
-      </span>
-      <span class="inline-flex items-center gap-1.5">
-        <span class="h-3 w-px bg-danger" />
-        Interruption
-      </span>
-      <span class="inline-flex items-center gap-1.5">
-        <span class="size-2.5 rounded-[3px] ring-2 ring-inset ring-primary" />
-        Selected turn
-      </span>
-    </div>
+        <span class="inline-flex items-center gap-1.5">
+          <span
+            class="size-2.5 rounded-[3px] opacity-80"
+            :style="{ backgroundColor: 'var(--cl-cost-ok)' }"
+          />
+          Cost stage within budget (EOU · LLM · TTS)
+        </span>
+        <span class="inline-flex items-center gap-1.5">
+          <span class="relative size-2.5 overflow-hidden rounded-[3px]">
+            <span
+              class="absolute inset-0"
+              :style="{ backgroundColor: 'var(--cl-danger)' }"
+            />
+            <span class="absolute inset-0 bg-[repeating-linear-gradient(45deg,transparent,transparent_1.5px,rgba(255,255,255,0.5)_1.5px,rgba(255,255,255,0.5)_3px)]" />
+          </span>
+          Cost stage over budget
+        </span>
+        <span class="inline-flex items-center gap-1.5">
+          <span class="h-3 w-px bg-danger" />
+          Interruption
+        </span>
+        <span class="inline-flex items-center gap-1.5">
+          <span class="size-2.5 rounded-[3px] ring-2 ring-inset ring-primary" />
+          Selected turn
+        </span>
+      </div>
 
-    <!-- Static caption — surfaces the interaction without relying on hover -->
-    <p class="text-[12px] text-muted-foreground">
-      Click a bar to highlight the cited turn in the transcript.
-    </p>
-  </div>
+      <!-- Static captions — interaction hint + one-line Modeled-timing definition
+         so a first-time reader knows what "Modeled timing" means (lexicon). -->
+      <p class="text-[12px] text-muted-foreground">
+        Click a bar to highlight the cited turn in the transcript.
+      </p>
+      <p
+        v-if="isModeled"
+        class="text-[12px] text-muted-foreground"
+      >
+        <span class="font-medium text-foreground">Modeled timing:</span>
+        per-stage durations are estimated from published LiveKit budgets (HighLevel
+        doesn't expose them) and rescaled to the call's real length — proportions,
+        not measured wall-clock offsets.
+      </p>
+    </div>
+  </TooltipProvider>
 </template>

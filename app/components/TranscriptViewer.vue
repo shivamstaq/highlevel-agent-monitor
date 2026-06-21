@@ -13,8 +13,18 @@ const props = defineProps<{
   useActions?: UseAction[]
   /** Turns to flash (bg-tint fade) + scroll to when a finding is selected. */
   flashIdxs?: number[]
-  /** Single active turn — gets the accent (--primary) ring for cross-highlight. */
+  /**
+   * Single active turn — gets the accent (--primary) ring for cross-highlight.
+   * Kept for back-compat; prefer `activeTurnIdxs` for a persisted multi-turn
+   * selection (e.g. a clicked timeline bar or use-action range).
+   */
   activeIdx?: number | null
+  /**
+   * Persisted active selection (P13): every index here keeps the accent ring,
+   * stably, until the selection changes — NOT a transient 1.6s flash. Drives the
+   * stable transcript<->timeline<->flow cross-highlight. Merged with `activeIdx`.
+   */
+  activeTurnIdxs?: number[]
   /** When false, turns are not clickable (read-only transcript). */
   selectable?: boolean
 }>()
@@ -28,6 +38,18 @@ function setTurnRef(idx: number, el: Element | null) {
 
 const evidenceSet = computed(() => new Set(props.evidenceIdxs ?? []))
 const flashSet = ref<Set<number>>(new Set())
+
+/**
+ * The PERSISTED active selection (P13): the union of the single `activeIdx`
+ * and the `activeTurnIdxs` array. Every member keeps a stable accent ring —
+ * the highlight is state, not a transient flash, so cross-highlight from the
+ * timeline / flow stays painted until the selection itself changes.
+ */
+const activeSet = computed(() => {
+  const s = new Set(props.activeTurnIdxs ?? [])
+  if (props.activeIdx != null) s.add(props.activeIdx)
+  return s
+})
 
 /** Map of turn idx -> useAction band membership (start/end for rounded edges). */
 const bandMap = computed(() => {
@@ -43,25 +65,39 @@ const bandMap = computed(() => {
   return m
 })
 
+/** Reduced-motion-safe scroll: honor prefers-reduced-motion for scrollIntoView. */
+function scrollTurnIntoView(idx: number) {
+  const el = turnRefs.value[idx]
+  if (!el) return
+  const reduce = typeof window !== 'undefined'
+    && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  el.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'center' })
+}
+
 const isSelectable = computed(() => props.selectable !== false)
 
 watch(() => props.flashIdxs, (idxs) => {
   if (!idxs || !idxs.length) return
   flashSet.value = new Set(idxs)
-  const first = Math.min(...idxs)
-  const el = turnRefs.value[first]
-  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  scrollTurnIntoView(Math.min(...idxs))
   setTimeout(() => {
     flashSet.value = new Set()
   }, 1600)
 })
 
-/** Scroll the active turn into view when it changes from an external source. */
-watch(() => props.activeIdx, (idx) => {
-  if (idx == null) return
-  const el = turnRefs.value[idx]
-  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-})
+/**
+ * Scroll the persisted active selection into view when it changes from an
+ * external source (a clicked timeline bar / flow node). Uses the lowest active
+ * index as the scroll anchor; reduced-motion safe.
+ */
+watch(
+  [() => props.activeIdx, () => props.activeTurnIdxs],
+  () => {
+    const idxs = [...activeSet.value]
+    if (!idxs.length) return
+    scrollTurnIntoView(Math.min(...idxs))
+  }
+)
 
 function speakerLabel(s: string): string {
   return s === 'agent' ? 'Voice AI' : 'Customer'
@@ -81,7 +117,7 @@ function onTurnClick(idx: number) {
         :key="turn.idx"
         :ref="(el: unknown) => setTurnRef(turn.idx, el as Element | null)"
         :type="isSelectable ? 'button' : undefined"
-        :aria-pressed="isSelectable ? (activeIdx === turn.idx) : undefined"
+        :aria-pressed="isSelectable ? activeSet.has(turn.idx) : undefined"
         :class="cn(
           'flex w-full gap-3 rounded-lg text-left outline-none',
           isSelectable && 'cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary',
@@ -115,11 +151,14 @@ function onTurnClick(idx: number) {
           </div>
 
           <!--
-            Bubble highlight language (two tokens + accent):
-              evidence   -> --warning ring  (finding cites this turn)
+            Bubble highlight language — two semantic tokens + the accent:
+              evidence   -> --warning ring  (a finding cites this turn)
               use-action -> --segment left-band (a call segment to action)
-              active     -> --primary ring  (currently selected / cross-highlight)
+              active     -> --primary ring  (PERSISTED selection / cross-highlight,
+                            stable until the selection changes — not a flash)
               flash      -> gentle bg-tint fade, motion-safe only (no scale jiggle)
+            The evidence ring and the use-action band are deliberately distinct
+            tokens so "cited as evidence" never reads the same as "needs action".
           -->
           <div
             :class="cn(
@@ -129,15 +168,20 @@ function onTurnClick(idx: number) {
                 : 'rounded-tr-sm border-transparent bg-secondary text-secondary-foreground',
               bandMap.has(turn.idx) && 'border-l-[3px] border-l-[color:var(--segment)]',
               evidenceSet.has(turn.idx) && 'ring-2 ring-warning/70 ring-offset-1 ring-offset-background',
-              activeIdx === turn.idx && 'ring-2 ring-primary ring-offset-1 ring-offset-background',
+              activeSet.has(turn.idx) && 'ring-2 ring-primary ring-offset-1 ring-offset-background',
               flashSet.has(turn.idx) && 'motion-safe:bg-primary/10'
             )"
           >
             {{ turn.text }}
           </div>
 
+          <!--
+            P14: render the band label ONCE, on the band's first turn, so a
+            7-turn use-action range gets one clear annotation instead of 7
+            repeats. The left-band stays on every turn for visual continuity.
+          -->
           <span
-            v-if="bandMap.has(turn.idx)"
+            v-if="bandMap.get(turn.idx)?.start"
             class="px-1 text-[11px] font-medium uppercase tracking-wide text-[color:var(--segment)]"
           >
             Use Action segment

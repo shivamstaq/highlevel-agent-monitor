@@ -36,7 +36,7 @@ import { Toaster } from '~/components/ui/sonner'
 import { useBreadcrumb } from '~/composables/useBreadcrumb'
 
 const route = useRoute()
-const { crumbs } = useBreadcrumb()
+const { trail } = useBreadcrumb()
 
 interface NavItem {
   label: string
@@ -69,9 +69,6 @@ const groups: NavGroup[] = [
 ]
 
 const settingsActive = computed(() => route.path.startsWith('/settings'))
-
-/** Root crumb is always Overview; pages supply the trail below it. */
-const trail = computed(() => crumbs.value)
 </script>
 
 <template>
@@ -147,25 +144,11 @@ const trail = computed(() => crumbs.value)
         <div class="h-5 w-px bg-border" />
         <Breadcrumb>
           <BreadcrumbList>
-            <BreadcrumbItem>
-              <BreadcrumbLink
-                v-if="trail.length"
-                as-child
-              >
-                <NuxtLink to="/">
-                  Overview
-                </NuxtLink>
-              </BreadcrumbLink>
-              <BreadcrumbPage v-else>
-                Overview
-              </BreadcrumbPage>
-            </BreadcrumbItem>
-
             <template
               v-for="(crumb, i) in trail"
               :key="`${crumb.label}-${i}`"
             >
-              <BreadcrumbSeparator />
+              <BreadcrumbSeparator v-if="i > 0" />
               <BreadcrumbItem>
                 <BreadcrumbLink
                   v-if="crumb.to && i < trail.length - 1"

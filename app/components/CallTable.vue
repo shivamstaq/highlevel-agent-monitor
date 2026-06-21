@@ -12,6 +12,7 @@ import {
 } from '~/components/ui/table'
 import SeverityBadge from '~/components/SeverityBadge.vue'
 import { useTone } from '~/composables/useTone'
+import { humanizeOutcome } from '~/lib/format'
 import { cn } from '~/lib/utils'
 
 /**
@@ -135,10 +136,13 @@ function contactLabel(item: CallListItem): string {
 
 <template>
   <div class="overflow-hidden rounded-xl border">
-    <Table>
+    <Table fixed>
       <TableHeader>
         <TableRow class="bg-muted/40 hover:bg-muted/40">
-          <TableHead :aria-sort="ariaSort('contact')">
+          <TableHead
+            class="w-[22%] min-w-[140px]"
+            :aria-sort="ariaSort('contact')"
+          >
             <button
               type="button"
               class="flex items-center gap-1 rounded-md font-medium focus-visible:outline-2 focus-visible:outline-primary"
@@ -162,6 +166,7 @@ function contactLabel(item: CallListItem): string {
 
           <TableHead
             v-if="showAgent"
+            class="w-[16%] min-w-[120px]"
             :aria-sort="ariaSort('agent')"
           >
             <button
@@ -185,7 +190,10 @@ function contactLabel(item: CallListItem): string {
             </button>
           </TableHead>
 
-          <TableHead :aria-sort="ariaSort('outcome')">
+          <TableHead
+            class="w-[15%] min-w-[120px]"
+            :aria-sort="ariaSort('outcome')"
+          >
             <button
               type="button"
               class="flex items-center gap-1 rounded-md font-medium focus-visible:outline-2 focus-visible:outline-primary"
@@ -207,11 +215,14 @@ function contactLabel(item: CallListItem): string {
             </button>
           </TableHead>
 
-          <TableHead class="hidden sm:table-cell">
+          <TableHead class="hidden w-[120px] sm:table-cell">
             Direction
           </TableHead>
 
-          <TableHead :aria-sort="ariaSort('started')">
+          <TableHead
+            class="w-[104px]"
+            :aria-sort="ariaSort('started')"
+          >
             <button
               type="button"
               class="flex items-center gap-1 rounded-md font-medium focus-visible:outline-2 focus-visible:outline-primary"
@@ -234,7 +245,7 @@ function contactLabel(item: CallListItem): string {
           </TableHead>
 
           <TableHead
-            class="hidden text-right md:table-cell"
+            class="hidden w-[88px] text-right md:table-cell"
             :aria-sort="ariaSort('findings')"
           >
             <button
@@ -258,7 +269,10 @@ function contactLabel(item: CallListItem): string {
             </button>
           </TableHead>
 
-          <TableHead :aria-sort="ariaSort('severity')">
+          <TableHead
+            class="w-[120px]"
+            :aria-sort="ariaSort('severity')"
+          >
             <button
               type="button"
               class="flex items-center gap-1 rounded-md font-medium focus-visible:outline-2 focus-visible:outline-primary"
@@ -281,7 +295,7 @@ function contactLabel(item: CallListItem): string {
           </TableHead>
 
           <TableHead
-            class="text-right"
+            class="w-[96px] text-right"
             :aria-sort="ariaSort('score')"
           >
             <button
@@ -315,9 +329,10 @@ function contactLabel(item: CallListItem): string {
           :key="item.call.id"
           :class="cn('group cursor-pointer', rowHeight)"
         >
-          <TableCell class="p-0">
+          <TableCell class="max-w-0 p-0">
             <NuxtLink
               :to="`/calls/${item.call.id}`"
+              :title="contactLabel(item)"
               :class="cn('flex items-center px-4 font-medium focus-visible:outline-2 focus-visible:outline-primary -outline-offset-2', rowHeight)"
             >
               <span class="truncate">{{ contactLabel(item) }}</span>
@@ -326,16 +341,20 @@ function contactLabel(item: CallListItem): string {
 
           <TableCell
             v-if="showAgent"
-            class="text-muted-foreground"
+            class="max-w-0 text-muted-foreground"
           >
-            <span class="truncate">{{ item.agentName }}</span>
+            <span
+              class="block truncate"
+              :title="item.agentName"
+            >{{ item.agentName }}</span>
           </TableCell>
 
-          <TableCell>
+          <TableCell class="max-w-0">
             <span
               v-if="item.call.outcome"
-              class="text-sm"
-            >{{ item.call.outcome }}</span>
+              class="block truncate text-sm"
+              :title="humanizeOutcome(item.call.outcome)"
+            >{{ humanizeOutcome(item.call.outcome) }}</span>
             <span
               v-else
               class="text-sm text-muted-foreground"

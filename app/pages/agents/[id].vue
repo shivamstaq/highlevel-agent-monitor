@@ -1,12 +1,13 @@
 <script setup lang="ts">
+import type { FlowAlignment, FlowNodeKind, NodeStatus } from '#shared/types'
 import { computed, watchEffect } from 'vue'
-import { ArrowUpRight, CircleCheck, Lightbulb, Target, Users } from 'lucide-vue-next'
-import { VisDonut, VisSingleContainer } from '@unovis/vue'
+import { ArrowUpRight, CircleCheck, Info, Lightbulb, Target, Users } from 'lucide-vue-next'
 import { Avatar, AvatarFallback } from '~/components/ui/avatar'
 import { Badge } from '~/components/ui/badge'
 import { Button } from '~/components/ui/button'
 import { Alert, AlertDescription, AlertTitle } from '~/components/ui/alert'
 import { Skeleton } from '~/components/ui/skeleton'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '~/components/ui/tooltip'
 import SectionCard from '~/components/SectionCard.vue'
 import CallTable from '~/components/CallTable.vue'
 import RecommendationCard from '~/components/RecommendationCard.vue'
@@ -54,9 +55,64 @@ const failingCalls = computed(() =>
 )
 const allCalls = computed(() => data.value?.calls ?? [])
 
-/* Headline avg-score donut: filled arc = accent, remainder = neutral track. */
-const criteriaMet = computed(() => Math.round(health.value?.avgScore ?? 0))
-const donutData = computed(() => [criteriaMet.value, Math.max(0, 100 - criteriaMet.value)])
+/**
+ * Criteria-met ring (P01). Plots the TRUE criteria-met rate — the share of
+ * success criteria the agent's analyzed calls actually met (health.criteriaMetRate,
+ * 0–1) — NOT the weighted Call score. `null` (no analyzed calls) renders an empty
+ * ring with an em-dash so we never imply 0% met where nothing was measured.
+ */
+const hasCriteriaData = computed(() => (health.value?.criteriaMetRate ?? null) !== null)
+const criteriaMetPct = computed(() =>
+  hasCriteriaData.value ? Math.round((health.value!.criteriaMetRate as number) * 100) : 0
+)
+
+/**
+ * Hand-rolled SSR-stable ring geometry (stroke-dasharray over a visible neutral
+ * track) — the Unovis VisDonut rendered blank server-side and resolved its
+ * remainder to an invisible near-white track (P01). r/circumference are fixed so
+ * the teal arc subtends exactly criteriaMetPct/100 of the circle.
+ */
+const RING = { size: 160, stroke: 14 }
+const ringRadius = (RING.size - RING.stroke) / 2
+const ringCircumference = 2 * Math.PI * ringRadius
+const ringDash = computed(() => (criteriaMetPct.value / 100) * ringCircumference)
+const criteriaTone = computed(() =>
+  hasCriteriaData.value ? toneClasses(scoreToneName(criteriaMetPct.value)).text : 'text-muted-foreground'
+)
+
+/**
+ * Aggregate drift overlay for the Expected-call-flow diagram (P19): turn the
+ * static design diagram into the agent's drift heatmap by feeding FlowDiagram a
+ * synthetic FlowAlignment whose per-node status is the agent's WORST recurring
+ * drift for that node (any skips -> skipped/warning, else any drift -> out_of_order,
+ * else hit/success). driftScore carries the rate so the node tooltip reads true.
+ */
+const aggregateAlignment = computed<FlowAlignment | null>(() => {
+  const fs = flowSummary.value
+  if (!agent.value || !fs || fs.callsScored === 0) return null
+  const nodeAlignments = fs.nodes.map((n) => {
+    const status: NodeStatus = n.skipRate > 0 ? 'skipped' : 'out_of_order'
+    const rate = n.skipRate > 0 ? n.skipRate : n.driftRate
+    return {
+      nodeId: n.nodeId,
+      label: n.label,
+      // Server guarantees a FlowNodeKind; the client FlowDriftSummary widens it to string.
+      kind: n.kind as FlowNodeKind,
+      status,
+      driftScore: Math.min(1, Math.max(0, rate)),
+      matchedTurnIdxs: [],
+      note: `${Math.round(rate * 100)}% of scored calls ${n.skipRate > 0 ? 'skipped' : 'drifted on'} this step`
+    }
+  })
+  return {
+    callId: '',
+    agentId: agent.value.id,
+    conformanceScore: fs.avgConformance ?? 0,
+    fitness: 0,
+    nodeAlignments,
+    actualPath: []
+  }
+})
 
 const failureTone = computed(() =>
   (health.value?.failureRate ?? 0) > 0 ? toneClasses('danger').text : 'text-foreground'
@@ -162,7 +218,25 @@ function conformanceTone(score: number): string {
           <SectionCard padding="roomy">
             <div class="grid grid-cols-2 gap-4 sm:grid-cols-4">
               <div class="flex flex-col gap-1">
-                <span class="text-[12px] font-medium text-muted-foreground">Avg score</span>
+                <span class="flex items-center gap-1 text-[12px] font-medium text-muted-foreground">
+                  Avg score
+                  <TooltipProvider :delay-duration="120">
+                    <Tooltip>
+                      <TooltipTrigger as-child>
+                        <button
+                          type="button"
+                          class="rounded-full text-muted-foreground focus-visible:outline-2 focus-visible:outline-primary"
+                          aria-label="What is Avg score?"
+                        >
+                          <Info class="size-3.5" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent class="max-w-xs text-xs">
+                        Avg score — this agent's average Call score (the overall weighted QA score of a call, 0–100) across its analyzed calls.
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                </span>
                 <span :class="cn('text-2xl font-semibold tabular-nums', toneClasses(scoreToneName(health.callsAnalyzed ? health.avgScore : null)).text)">
                   {{ health.callsAnalyzed ? Math.round(health.avgScore) : '—' }}
                 </span>
@@ -184,20 +258,42 @@ function conformanceTone(score: number): string {
             </div>
           </SectionCard>
 
-          <!-- Flow drift across calls -->
+          <!--
+            Expected flow + actual drift, fused (P19): the per-node skip-rate list
+            and the expected-flow diagram now live in ONE card so they read as a
+            single expected-vs-actual story, and the diagram is tinted by each
+            node's fleet drift rate (the agent's drift heatmap) instead of being a
+            static design picture beside a disconnected bar list.
+          -->
           <SectionCard
-            v-if="flowSummary && flowSummary.callsScored > 0"
-            title="Flow drift across calls"
-            :description="`Where this agent most often departs from its expected flow (${flowSummary.callsScored} call${flowSummary.callsScored === 1 ? '' : 's'})`"
+            v-if="flow || (flowSummary && flowSummary.callsScored > 0)"
+            title="Expected call flow vs. actual drift"
+            description="The agent's designed flow, painted with where its scored calls actually skip or drift."
             padding="roomy"
           >
             <template
-              v-if="flowSummary.avgConformance !== null"
+              v-if="flowSummary && flowSummary.avgConformance !== null"
               #actions
             >
               <div class="text-right">
-                <div class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Avg adherence
+                <div class="flex items-center justify-end gap-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                  Flow adherence
+                  <TooltipProvider :delay-duration="120">
+                    <Tooltip>
+                      <TooltipTrigger as-child>
+                        <button
+                          type="button"
+                          class="rounded-full text-muted-foreground focus-visible:outline-2 focus-visible:outline-primary"
+                          aria-label="What is Flow adherence?"
+                        >
+                          <Info class="size-3.5" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent class="max-w-xs text-xs">
+                        Flow adherence — how closely this agent's calls followed their expected flow (0–100), averaged across {{ flowSummary.callsScored }} scored call{{ flowSummary.callsScored === 1 ? '' : 's' }}.
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
                 </div>
                 <div :class="cn('text-2xl font-semibold tabular-nums', conformanceTone(flowSummary.avgConformance))">
                   {{ flowSummary.avgConformance }}
@@ -205,61 +301,66 @@ function conformanceTone(score: number): string {
               </div>
             </template>
 
-            <div
-              v-if="flowSummary.nodes.length"
-              class="flex flex-col gap-4"
-            >
+            <div class="flex flex-col gap-5">
+              <!-- Actual: where the agent's scored calls depart from the design. -->
               <div
-                v-for="n in flowSummary.nodes.slice(0, 5)"
-                :key="n.nodeId"
-                class="grid grid-cols-[1fr_auto] items-center gap-x-3 gap-y-1.5"
+                v-if="flowSummary && flowSummary.nodes.length"
+                class="flex flex-col gap-4"
               >
-                <span class="flex min-w-0 items-center gap-2 text-sm">
-                  <Badge
-                    variant="outline"
-                    class="shrink-0 rounded-md text-[11px] capitalize"
-                  >{{ n.kind }}</Badge>
-                  <span class="truncate font-medium">{{ n.label }}</span>
-                </span>
-                <span class="shrink-0 text-right text-sm tabular-nums text-muted-foreground">
-                  {{ Math.round(driftRate(n) * 100) }}% {{ n.skipRate > 0 ? 'skipped' : 'drifted' }}
-                </span>
+                <p class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                  Most-skipped steps ({{ flowSummary.callsScored }} scored call{{ flowSummary.callsScored === 1 ? '' : 's' }})
+                </p>
                 <div
-                  class="col-span-2 h-2 overflow-hidden rounded-full"
-                  :class="driftToneSet(n).bg"
-                  role="progressbar"
-                  :aria-valuenow="Math.round(driftRate(n) * 100)"
-                  aria-valuemin="0"
-                  aria-valuemax="100"
-                  :aria-label="`${n.label} drift`"
+                  v-for="n in flowSummary.nodes.slice(0, 5)"
+                  :key="n.nodeId"
+                  class="grid grid-cols-[1fr_auto] items-center gap-x-3 gap-y-1.5"
                 >
+                  <span class="flex min-w-0 items-center gap-2 text-sm">
+                    <Badge
+                      variant="outline"
+                      class="shrink-0 rounded-md text-[11px] capitalize"
+                    >{{ n.kind }}</Badge>
+                    <span class="truncate font-medium">{{ n.label }}</span>
+                  </span>
+                  <span class="shrink-0 text-right text-sm tabular-nums text-muted-foreground">
+                    {{ Math.round(driftRate(n) * 100) }}% {{ n.skipRate > 0 ? 'skipped' : 'drifted' }}
+                  </span>
                   <div
-                    class="h-full rounded-full"
-                    :class="driftToneSet(n).dot"
-                    :style="{ width: `${Math.max(2, Math.round(driftRate(n) * 100))}%` }"
-                  />
+                    class="col-span-2 h-2 overflow-hidden rounded-full"
+                    :class="driftToneSet(n).bg"
+                    role="progressbar"
+                    :aria-valuenow="Math.round(driftRate(n) * 100)"
+                    aria-valuemin="0"
+                    aria-valuemax="100"
+                    :aria-label="`${n.label} drift`"
+                  >
+                    <div
+                      class="h-full rounded-full"
+                      :class="driftToneSet(n).dot"
+                      :style="{ width: `${Math.max(2, Math.round(driftRate(n) * 100))}%` }"
+                    />
+                  </div>
                 </div>
               </div>
-            </div>
-            <p
-              v-else
-              class="py-2 text-center text-sm text-muted-foreground"
-            >
-              No recurring drift — calls follow the expected flow.
-            </p>
-          </SectionCard>
+              <p
+                v-else-if="flowSummary && flowSummary.callsScored > 0"
+                class="text-sm text-muted-foreground"
+              >
+                No recurring drift — scored calls follow the expected flow.
+              </p>
 
-          <!-- Expected call flow (moved to the wide column for room — W11) -->
-          <SectionCard
-            v-if="flow"
-            title="Expected call flow"
-            description="Design intent generated from the agent's goal and script."
-            padding="roomy"
-          >
-            <FlowDiagram
-              :flow="flow"
-              :interactive="false"
-            />
+              <!-- Expected: the design diagram, tinted by each node's drift rate. -->
+              <div
+                v-if="flow"
+                class="border-t pt-5"
+              >
+                <FlowDiagram
+                  :flow="flow"
+                  :alignment="aggregateAlignment"
+                  :interactive="false"
+                />
+              </div>
+            </div>
           </SectionCard>
 
           <!-- Calls needing attention -->
@@ -290,43 +391,93 @@ function conformanceTone(score: number): string {
           </div>
         </div>
 
-        <!-- Narrow column: adherence donut + recommendations -->
+        <!-- Narrow column: Criteria-met ring + recommendations -->
         <div class="flex min-w-0 flex-col gap-6">
           <SectionCard
-            title="Avg criteria met"
+            title="Criteria met"
+            description="Share of this agent's success criteria its scored calls actually met."
             padding="roomy"
           >
             <div class="flex flex-col items-center gap-4">
-              <div class="relative size-[160px]">
-                <VisSingleContainer
-                  :data="donutData"
-                  :height="160"
+              <!--
+                SSR-stable Criteria-met ring (P01): a stroke-dasharray SVG arc over
+                a VISIBLE neutral track. Plots the true criteria-met rate
+                (criteriaMetRate, share of perCriterion.met) — NOT the Call score.
+                The teal arc subtends exactly criteriaMetPct/100 of the circle and
+                renders identically server-side and after hydration.
+              -->
+              <div
+                class="relative"
+                :style="{ width: `${RING.size}px`, height: `${RING.size}px` }"
+              >
+                <svg
+                  :viewBox="`0 0 ${RING.size} ${RING.size}`"
+                  class="size-full -rotate-90"
+                  role="img"
+                  :aria-label="hasCriteriaData ? `${criteriaMetPct}% of success criteria met` : 'No criteria-met data yet'"
                 >
-                  <VisDonut
-                    :value="(d: number) => d"
-                    :arc-width="14"
-                    :corner-radius="6"
-                    :color="['var(--primary)', 'var(--chart-track, var(--muted))']"
+                  <!-- Track: visible neutral ring (not the invisible near-white --muted). -->
+                  <circle
+                    :cx="RING.size / 2"
+                    :cy="RING.size / 2"
+                    :r="ringRadius"
+                    fill="none"
+                    stroke="var(--border)"
+                    :stroke-width="RING.stroke"
                   />
-                </VisSingleContainer>
+                  <!-- Value arc: single teal accent series. -->
+                  <circle
+                    v-if="hasCriteriaData"
+                    :cx="RING.size / 2"
+                    :cy="RING.size / 2"
+                    :r="ringRadius"
+                    fill="none"
+                    stroke="var(--primary)"
+                    :stroke-width="RING.stroke"
+                    stroke-linecap="round"
+                    :stroke-dasharray="`${ringDash} ${ringCircumference}`"
+                    class="motion-safe:transition-[stroke-dasharray] motion-safe:duration-[var(--dur)] motion-safe:ease-[var(--ease)]"
+                  />
+                </svg>
                 <div class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
-                  <span class="text-3xl font-semibold tabular-nums">{{ criteriaMet }}%</span>
-                  <span class="text-[12px] text-muted-foreground">avg met</span>
+                  <span :class="cn('text-3xl font-semibold tabular-nums', criteriaTone)">
+                    {{ hasCriteriaData ? `${criteriaMetPct}%` : '—' }}
+                  </span>
+                  <span class="text-[12px] text-muted-foreground">criteria met</span>
                 </div>
               </div>
+
+              <p
+                v-if="!hasCriteriaData"
+                class="text-center text-sm text-muted-foreground"
+              >
+                No analyzed calls yet — this ring fills once we score the agent's calls.
+              </p>
+
+              <!--
+                Per-criterion list (P01): the criteria measured. A true per-criterion
+                met % needs server per-criterion aggregates we don't carry here, so we
+                show the criteria and their kind honestly rather than fabricate a rate.
+              -->
               <div
                 v-if="agent.successCriteria.length"
                 class="w-full space-y-2.5"
               >
+                <p class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                  Success criteria
+                </p>
                 <div
                   v-for="c in agent.successCriteria"
                   :key="c.id"
                   class="flex items-center justify-between gap-2 text-sm"
                 >
-                  <span class="truncate text-muted-foreground">{{ c.label }}</span>
+                  <span class="flex min-w-0 items-center gap-1.5 truncate text-muted-foreground">
+                    <CircleCheck :class="cn('size-3.5 shrink-0', toneClasses('success').text)" />
+                    <span class="truncate">{{ c.label }}</span>
+                  </span>
                   <Badge
                     variant="outline"
-                    class="rounded-md text-[11px] capitalize"
+                    class="shrink-0 rounded-md text-[11px] capitalize"
                   >
                     {{ c.kind }}
                   </Badge>

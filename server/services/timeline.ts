@@ -97,6 +97,23 @@ export function synthesizeTimeline(call: Call, transcript: Transcript): CallTime
     }
   }
 
+  // P05/P06: the raw modeled clock collapses inter-turn silence, so its span can
+  // contradict the call's real duration (e.g. 46s modeled vs a 258s call). Scale
+  // every event time by realDuration / rawModeledSpan so the timeline's total
+  // lands on the call's true durationSec and the "Modeled timing" axis no longer
+  // contradicts the header. avgResponseLatencyMs is a boundary metric (caller
+  // stops -> agent speaks) and is left UNSCALED — it stays the honest measured
+  // value documented in the popover.
+  const rawSpan = events.reduce((max, e) => Math.max(max, e.tEndMs), 0)
+  const targetSpan = call.durationSec * 1000
+  if (rawSpan > 0 && targetSpan > 0) {
+    const scale = targetSpan / rawSpan
+    for (const e of events) {
+      e.tStartMs = Math.round(e.tStartMs * scale)
+      e.tEndMs = Math.round(e.tEndMs * scale)
+    }
+  }
+
   return finalizeTimeline(call.id, 'modeled', events, responseLatencies, interruptionCount)
 }
 

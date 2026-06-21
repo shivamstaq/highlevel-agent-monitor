@@ -1,21 +1,26 @@
 <script setup lang="ts">
 import type { ExpectedFlow, FlowAlignment, NodeAlignment, NodeStatus } from '#shared/types'
 import { computed } from 'vue'
-import { ArrowRight, CheckCircle2, CircleSlash, MoveRight, PlusCircle, ShuffleIcon } from 'lucide-vue-next'
+import { ArrowRight, CheckCircle2, ChevronRight, CircleSlash, Info, MoveRight, PlusCircle, ShuffleIcon } from 'lucide-vue-next'
 import { Progress } from '~/components/ui/progress'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '~/components/ui/tooltip'
 import SectionCard from '~/components/SectionCard.vue'
 import FlowDiagram from '~/components/FlowDiagram.vue'
 import { useTone } from '~/composables/useTone'
 import { cn } from '~/lib/utils'
 
 /**
- * FlowDrift — the call's conformance/fitness rollup + the flow graph tinted by
- * conformance + a clickable drift list that cross-highlights the cited turns.
+ * FlowDrift — the call's Flow adherence rollup made EXPECTED-vs-ACTUAL explicit:
+ * the ordered ACTUAL path the call traversed (P18) rendered against the expected
+ * flow, a tinted flow graph, and a clickable drift list that cross-highlights
+ * the cited turns.
+ *
+ * Lexicon (P09): the headline is "Flow adherence" (= conformanceScore), defined
+ * inline on first use. "Fitness" appears only as a small, clearly-defined
+ * secondary stat — never as a second headline ("Conformance"/"Process fitness"
+ * are retired as headline labels).
  *
  * All status color routes through useTone() tokens (no raw emerald-/amber-/red).
- * The header conformance band, the progress bar fill/track, the status badges,
- * and the drift-row left accent all read from the same semantic scale as the
- * rest of the app.
  */
 const props = defineProps<{
   flow: ExpectedFlow
@@ -49,6 +54,89 @@ const conformanceBar = computed(() => cn(
 ))
 
 const fitnessPct = computed(() => Math.round(props.alignment.fitness * 100))
+
+/* ----------------------------------------------------------------------------
+ * Expected-vs-actual (P18) — make "designed vs happened" explicit.
+ *
+ * `expectedSteps` is the designed flow's required spine in order, each tagged
+ * with the status it ended up in (hit / skipped / out_of_order) so a skipped
+ * required step is called out inline rather than left to inference.
+ *
+ * `actualSteps` is the ordered list of nodes the call ACTUALLY traversed
+ * (alignment.actualPath), resolved to labels + status, with 'extra' (unplanned)
+ * behaviors interleaved by the order they appeared. This is the one datum that
+ * makes process-mining "actual vs design intent" visible at a glance.
+ * ------------------------------------------------------------------------- */
+const labelByNodeId = computed(() => {
+  const m = new Map<string, string>()
+  for (const n of props.flow.nodes) m.set(n.id, n.label)
+  return m
+})
+
+const alignByNodeId = computed(() => {
+  const m = new Map<string, NodeAlignment>()
+  for (const na of props.alignment.nodeAlignments) {
+    if (na.nodeId) m.set(na.nodeId, na)
+  }
+  return m
+})
+
+interface PathStep {
+  key: string
+  label: string
+  nodeId?: string
+  status: NodeStatus
+  /** Whether skipping is benign (untriggered conditional branch). */
+  benign: boolean
+}
+
+/** The designed required spine, in order, tagged with how the call did on it. */
+const expectedSteps = computed<PathStep[]>(() =>
+  props.flow.nodes
+    .filter(n => n.expected)
+    .map((n) => {
+      const na = alignByNodeId.value.get(n.id)
+      const status: NodeStatus = na?.status ?? 'skipped'
+      return {
+        key: `exp-${n.id}`,
+        label: n.label,
+        nodeId: n.id,
+        status,
+        benign: false
+      }
+    })
+)
+
+/** The ordered path the call actually walked (process-mining log moves). */
+const actualSteps = computed<PathStep[]>(() => {
+  const steps: PathStep[] = props.alignment.actualPath.map((id, i) => {
+    const na = alignByNodeId.value.get(id)
+    return {
+      key: `act-${id}-${i}`,
+      label: labelByNodeId.value.get(id) ?? na?.label ?? id,
+      nodeId: id,
+      status: na?.status ?? 'hit',
+      benign: false
+    }
+  })
+  // Append any 'extra' (unplanned) behaviours that have no expected node id.
+  props.alignment.nodeAlignments
+    .filter(na => na.status === 'extra')
+    .forEach((na, i) => steps.push({
+      key: `extra-${i}`,
+      label: na.label,
+      status: 'extra',
+      benign: false
+    }))
+  return steps
+})
+
+/** Required steps the call skipped (the headline gap of the actual path). */
+const skippedRequired = computed<PathStep[]>(() =>
+  expectedSteps.value.filter(s => s.status === 'skipped')
+)
+
+const hasActualPath = computed(() => actualSteps.value.length > 0)
 
 /* ----------------------------------------------------------------------------
  * Status presentation for badges / drifted rows — icon + token badge.
@@ -102,39 +190,147 @@ function isActive(na: NodeAlignment): boolean {
     padding="flush"
     class="overflow-hidden"
   >
-    <!-- Conformance + fitness header (tokenized band) -->
-    <div class="grid grid-cols-1 divide-y border-b bg-muted/30 sm:grid-cols-2 sm:divide-x sm:divide-y-0">
-      <!-- Conformance -->
-      <div class="flex flex-col gap-2 p-5">
-        <div class="flex items-center justify-between">
-          <p class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-            Conformance
-          </p>
-          <span :class="cn('text-[12px] font-medium', conformanceTone.text)">{{ conformanceBandLabel }}</span>
+    <!-- Flow adherence header (tokenized band). The ONE headline metric; fitness
+         is demoted to a small defined secondary stat (P09 lexicon). -->
+    <TooltipProvider :delay-duration="120">
+      <div class="flex flex-col gap-3 border-b bg-muted/30 p-5">
+        <div class="flex items-start justify-between gap-3">
+          <div class="flex flex-col gap-1.5">
+            <!-- Flow adherence — defined inline on first use (P09/P16) -->
+            <div class="flex items-center gap-1.5">
+              <p class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                Flow adherence
+              </p>
+              <Tooltip>
+                <TooltipTrigger as-child>
+                  <button
+                    type="button"
+                    class="rounded-full text-muted-foreground/70 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary hover:text-foreground"
+                    aria-label="What is Flow adherence?"
+                  >
+                    <Info class="size-3.5" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent class="max-w-xs text-xs leading-relaxed">
+                  How closely this call followed its expected flow — every
+                  required step hit, in the designed order. 100 = walked the
+                  flow exactly; lower = steps were skipped, taken out of order,
+                  or unplanned ones were added.
+                </TooltipContent>
+              </Tooltip>
+            </div>
+            <p class="text-xs text-muted-foreground">
+              Did the call follow the steps it was designed to.
+            </p>
+          </div>
+          <span :class="cn('shrink-0 rounded-full px-2 py-0.5 text-[12px] font-medium', conformanceTone.badge)">{{ conformanceBandLabel }}</span>
         </div>
-        <div class="flex items-end gap-1.5">
-          <span :class="cn('text-[30px] font-semibold leading-none tabular-nums', conformanceTone.text)">{{ Math.round(conformance) }}</span>
-          <span class="pb-0.5 text-sm text-muted-foreground">/ 100</span>
+
+        <div class="flex items-end justify-between gap-4">
+          <div class="flex items-end gap-1.5">
+            <span :class="cn('text-[30px] font-semibold leading-none tabular-nums', conformanceTone.text)">{{ Math.round(conformance) }}</span>
+            <span class="pb-0.5 text-sm text-muted-foreground">/ 100</span>
+          </div>
+          <!-- Fitness: small, clearly-defined secondary stat (no second headline) -->
+          <Tooltip>
+            <TooltipTrigger as-child>
+              <span class="flex cursor-help items-baseline gap-1 text-[12px] text-muted-foreground">
+                <span class="font-medium tabular-nums text-foreground">{{ fitnessPct }}%</span>
+                required steps in order
+                <Info class="size-3 translate-y-0.5 text-muted-foreground/60" />
+              </span>
+            </TooltipTrigger>
+            <TooltipContent class="max-w-xs text-xs leading-relaxed">
+              Process fitness — the share of required steps the call hit in the
+              designed order. (A step that occurred but out of sequence is
+              counted by Flow adherence's ordering penalty, not here.)
+            </TooltipContent>
+          </Tooltip>
         </div>
+
         <Progress
           :model-value="conformance"
           :class="cn('h-2', conformanceBar)"
         />
       </div>
+    </TooltipProvider>
 
-      <!-- Fitness -->
-      <div class="flex flex-col gap-2 p-5">
-        <p class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-          Process fitness
-        </p>
-        <div class="flex items-end gap-1.5">
-          <span class="text-[30px] font-semibold leading-none tabular-nums">{{ fitnessPct }}</span>
-          <span class="pb-0.5 text-sm text-muted-foreground">%</span>
+    <!-- Expected vs actual (P18): the ordered ACTUAL path the call traversed,
+         shown against the designed flow so "designed vs happened" is explicit. -->
+    <div class="flex flex-col gap-3 border-b p-5">
+      <div class="flex items-center gap-1.5">
+        <h3 class="text-sm font-semibold">
+          Expected vs actual path
+        </h3>
+        <span class="text-xs text-muted-foreground">— the order the call really walked</span>
+      </div>
+
+      <!-- Actual path breadcrumb -->
+      <div class="flex flex-col gap-1.5">
+        <span class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Actual path</span>
+        <div
+          v-if="hasActualPath"
+          class="flex flex-wrap items-center gap-x-1 gap-y-1.5"
+        >
+          <template
+            v-for="(step, i) in actualSteps"
+            :key="step.key"
+          >
+            <ChevronRight
+              v-if="i > 0"
+              class="size-3.5 shrink-0 text-muted-foreground/40"
+            />
+            <span
+              :class="cn(
+                'inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-xs',
+                step.status === 'extra' ? cn(statusTone('extra').badge, 'border-danger/30') : 'bg-card',
+                step.status === 'out_of_order' && cn(statusTone('out_of_order').badge, 'border-warning/30')
+              )"
+            >
+              <span :class="cn('size-1.5 shrink-0 rounded-full', statusTone(step.status).dot)" />
+              {{ step.label }}
+              <span
+                v-if="step.status === 'out_of_order'"
+                class="text-[10px] uppercase tracking-wide opacity-80"
+              >out of order</span>
+              <span
+                v-else-if="step.status === 'extra'"
+                class="text-[10px] uppercase tracking-wide opacity-80"
+              >unplanned</span>
+            </span>
+          </template>
         </div>
-        <p class="text-xs leading-relaxed text-muted-foreground">
-          Share of the designed flow the call actually replayed.
+        <p
+          v-else
+          class="text-xs text-muted-foreground"
+        >
+          No flow steps were enacted on this call.
         </p>
       </div>
+
+      <!-- Skipped required steps — the gap between expected and actual -->
+      <div
+        v-if="skippedRequired.length"
+        class="flex flex-wrap items-center gap-x-2 gap-y-1.5"
+      >
+        <span class="inline-flex items-center gap-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          <CircleSlash :class="cn('size-3.5', statusTone('skipped').text)" />
+          Skipped (expected but never happened)
+        </span>
+        <span
+          v-for="step in skippedRequired"
+          :key="step.key"
+          :class="cn('inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs line-through decoration-warning/50', statusTone('skipped').badge)"
+        >
+          {{ step.label }}
+        </span>
+      </div>
+      <p
+        v-else
+        :class="cn('text-xs', statusTone('hit').text)"
+      >
+        Every expected step occurred — no skipped required steps.
+      </p>
     </div>
 
     <div class="flex flex-col gap-5 p-5">

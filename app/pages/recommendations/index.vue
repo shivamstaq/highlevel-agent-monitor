@@ -9,6 +9,7 @@ import { Alert, AlertDescription, AlertTitle } from '~/components/ui/alert'
 import { Skeleton } from '~/components/ui/skeleton'
 import { useTone } from '~/composables/useTone'
 import { useBreadcrumb } from '~/composables/useBreadcrumb'
+import { toSentenceCase } from '~/lib/format'
 
 /**
  * /recommendations — the fleet-wide fix-queue.
@@ -41,6 +42,22 @@ const { data, pending, error, refresh } = await useAsyncData(
 )
 
 const items = computed<RecommendationItem[]>(() => data.value ?? [])
+
+/**
+ * Display-only sentence-case normalization (P15). Model-authored titles drift
+ * between Title Case ("Update Script to State Incentives") and sentence case in
+ * the same grid; the fix-queue is the payoff surface, so titles must read
+ * consistently. We normalize the title for RENDER ONLY — a shallow display
+ * clone — and never mutate `data.value`, so grouping, counts, the deep-link
+ * source, and the recurrence chip all still read the authoritative payload.
+ * toSentenceCase preserves acronyms (GHL/EOU/TTS) and drops a trailing period.
+ */
+function toDisplayItem(it: RecommendationItem): RecommendationItem {
+  return {
+    ...it,
+    recommendation: { ...it.recommendation, title: toSentenceCase(it.recommendation.title) }
+  }
+}
 
 /** The scoped agent's name (any item carries it) for the filter chip + heading. */
 const scopedAgentName = computed(() => (agentId.value ? items.value[0]?.agentName : undefined))
@@ -227,7 +244,7 @@ function itemKey(it: RecommendationItem): string {
           <RecommendationCard
             v-for="it in group.items"
             :key="itemKey(it)"
-            :item="it"
+            :item="toDisplayItem(it)"
           />
         </div>
       </section>
