@@ -37,7 +37,7 @@ const { locationId, userId, email, ready } = useGhlBridge()
 const { setBreadcrumb } = useBreadcrumb()
 const runtime = useRuntimeConfig()
 
-useHead({ title: 'Settings — Voice AI Copilot' })
+useHead({ title: 'Settings' })
 
 watchEffect(() => {
   setBreadcrumb([{ label: 'Settings' }])

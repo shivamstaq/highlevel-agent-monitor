@@ -30,7 +30,7 @@ const { getFleet } = useApi()
 const { scoreToneName } = useTone()
 const { setBreadcrumb } = useBreadcrumb()
 
-useHead({ title: 'Agents · Voice AI Copilot' })
+useHead({ title: 'Agents' })
 setBreadcrumb([{ label: 'Agents' }])
 
 const { data: fleet, pending, error, refresh } = await useAsyncData('agents-roster', () => getFleet())

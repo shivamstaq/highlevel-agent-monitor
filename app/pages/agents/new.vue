@@ -24,7 +24,7 @@ import { cn } from '~/lib/utils'
 const { createAgent } = useApi()
 const { setBreadcrumb } = useBreadcrumb()
 
-useHead({ title: 'New agent — Voice AI Copilot' })
+useHead({ title: 'New agent' })
 
 watchEffect(() => {
   setBreadcrumb([

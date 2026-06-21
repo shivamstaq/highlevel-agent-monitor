@@ -27,7 +27,7 @@ const { getRecommendations } = useApi()
 const { severityTone, severityLabel } = useTone()
 const { setBreadcrumb } = useBreadcrumb()
 
-useHead({ title: 'Recommendations — Voice AI Copilot' })
+useHead({ title: 'Recommendations' })
 
 /** ?agentId scopes the queue to one agent; reactive so URL changes refetch. */
 const agentId = computed(() => {
@@ -242,8 +242,8 @@ function itemKey(it: RecommendationItem): string {
 
         <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           <RecommendationCard
-            v-for="it in group.items"
-            :key="itemKey(it)"
+            v-for="(it, i) in group.items"
+            :key="`${group.impact}-${i}-${itemKey(it)}`"
             :item="toDisplayItem(it)"
           />
         </div>

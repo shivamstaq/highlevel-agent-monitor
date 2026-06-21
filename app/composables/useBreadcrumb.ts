@@ -1,4 +1,4 @@
-import { computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 /**
  * A single breadcrumb crumb. `to` omitted = current page (non-clickable leaf).
@@ -142,6 +142,20 @@ export function useBreadcrumb() {
    */
   const override = useState<Crumb[] | null>('breadcrumb', () => null)
 
+  /**
+   * Pages set their override (the resolved-name leaf) inside a post-await
+   * watchEffect, so the value lands in the SSR payload. If the layout consumed it
+   * during SSR/hydration, the server HTML (route-derived "Call") would differ from
+   * the client's first render ("Sandra Mills") and Vue logs a hydration mismatch.
+   * Gate the override behind a client-mounted flag: server + first client render
+   * both use the route-derived floor (they match), then the resolved name swaps in
+   * one tick after hydration completes.
+   */
+  const hydrated = ref(false)
+  onMounted(() => {
+    hydrated.value = true
+  })
+
   function setBreadcrumb(next: Crumb[]) {
     override.value = next
   }
@@ -161,11 +175,12 @@ export function useBreadcrumb() {
   const trail = computed<Crumb[]>(() => {
     const derived = trailFromPath(route.path)
     const ov = override.value
-    // Accept the override only when it matches the current route's shape: same
-    // depth AND the same ancestor `to` targets. This lets a page swap the leaf
-    // label (id -> resolved name) while rejecting a stale override left over
-    // from a previous, structurally-different route during client navigation.
-    if (ov && ov.length === derived.length
+    // Accept the override only AFTER hydration (so SSR and the first client render
+    // both show the route-derived floor and match), and only when it matches the
+    // current route's shape: same depth AND the same ancestor `to` targets. This
+    // lets a page swap the leaf label (id -> resolved name) without a hydration
+    // mismatch, while rejecting a stale override left over from a previous route.
+    if (hydrated.value && ov && ov.length === derived.length
       && ov.every((c, i) => c.to === derived[i]?.to)) {
       return ov
     }

@@ -34,7 +34,7 @@ const health = computed(() => data.value?.health)
 const flowSummary = computed(() => data.value?.flowSummary)
 const recommendations = computed(() => data.value?.recommendations ?? [])
 
-useHead(() => ({ title: `${agent.value?.name ?? 'Agent'} · Voice AI Copilot` }))
+useHead(() => ({ title: agent.value?.name ?? 'Agent' }))
 
 watchEffect(() => {
   setBreadcrumb([
