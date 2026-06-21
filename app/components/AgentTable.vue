@@ -79,7 +79,77 @@ function failureClass(rate: number): string {
 </script>
 
 <template>
-  <div class="overflow-hidden rounded-xl border">
+  <!--
+    R3-03 phone-first reflow: BELOW sm we do NOT render the fixed multi-column
+    roster (comparison metrics hid behind h-scroll). Each agent becomes a 2-line
+    stacked, full-width row — the whole row a NuxtLink to /agents/:id with a
+    visible focus ring — so Avg score / Flow adherence / failures stay visible.
+  -->
+  <div class="overflow-hidden rounded-xl border sm:hidden">
+    <ul
+      v-if="rows.length"
+      class="divide-y"
+    >
+      <li
+        v-for="row in rows"
+        :key="row.agent.id"
+      >
+        <NuxtLink
+          :to="`/agents/${row.agent.id}`"
+          class="flex items-center gap-3 px-4 py-3 focus-visible:outline-2 focus-visible:outline-primary -outline-offset-2 motion-safe:transition-colors active:bg-muted/50"
+        >
+          <Avatar class="size-9 shrink-0 rounded-full">
+            <AvatarFallback class="rounded-full bg-primary/10 text-[12px] font-semibold text-primary">
+              {{ initials(row.agent.name) }}
+            </AvatarFallback>
+          </Avatar>
+          <div class="min-w-0 flex-1">
+            <div class="flex items-baseline justify-between gap-2">
+              <span class="truncate text-sm font-semibold">{{ row.agent.name }}</span>
+              <span
+                :class="cn('shrink-0 text-sm font-semibold tabular-nums', row.callsAnalyzed ? scoreToneSet(row.avgScore).text : 'text-muted-foreground')"
+              >{{ row.callsAnalyzed ? Math.round(row.avgScore) : '—' }}</span>
+            </div>
+            <div class="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[12px] text-muted-foreground">
+              <span
+                :class="cn(
+                  'shrink-0 font-medium',
+                  row.callsAnalyzed ? scoreToneSet(row.avgScore).text : 'text-muted-foreground'
+                )"
+              >{{ row.callsAnalyzed ? scoreBandLabel(row.avgScore) : 'No data' }}</span>
+              <span aria-hidden="true">·</span>
+              <span class="shrink-0">
+                Flow
+                <span
+                  v-if="row.avgConformance != null"
+                  :class="cn('font-medium tabular-nums', toneClasses(scoreToneName(row.avgConformance)).text)"
+                >{{ Math.round(row.avgConformance) }}</span>
+                <span v-else>—</span>
+              </span>
+              <span aria-hidden="true">·</span>
+              <span class="shrink-0 tabular-nums">
+                {{ Math.round(row.failureRate * 100) }}% fail
+              </span>
+              <template v-if="row.openUseActions">
+                <span aria-hidden="true">·</span>
+                <span class="shrink-0 tabular-nums">{{ row.openUseActions }} use actions</span>
+              </template>
+            </div>
+          </div>
+          <ChevronRight class="size-4 shrink-0 text-muted-foreground" />
+        </NuxtLink>
+      </li>
+    </ul>
+
+    <div
+      v-else
+      class="px-4 py-10 text-center text-sm text-muted-foreground"
+    >
+      No agents to show yet.
+    </div>
+  </div>
+
+  <div class="hidden overflow-hidden rounded-xl border sm:block">
     <Table fixed>
       <colgroup>
         <!-- Agent (text, flexes) · Status · Avg score · Flow adherence · Failures · Use actions · chevron -->
@@ -223,15 +293,21 @@ function failureClass(rate: number): string {
         <TableRow
           v-for="row in rows"
           :key="row.agent.id"
-          class="group h-12 cursor-pointer"
+          class="group relative h-12 cursor-pointer"
         >
-          <TableCell class="p-0">
+          <TableCell>
+            <!--
+              R3-06: full-row click-through via a stretched-link overlay. ONE
+              NuxtLink per row (one tab stop, keyboard + SR reachable) covers the
+              whole row so Status/Avg score/Flow adherence/Failures cells are all
+              part of the activation target, not just the first cell.
+            -->
             <NuxtLink
               :to="`/agents/${row.agent.id}`"
-              :class="cn(
-                'flex h-12 items-center gap-3 px-4 focus-visible:outline-2 focus-visible:outline-primary -outline-offset-2'
-              )"
-            >
+              :aria-label="`Open agent · ${row.agent.name}`"
+              class="absolute inset-0 z-0 rounded-md focus-visible:outline-2 focus-visible:outline-primary -outline-offset-2"
+            />
+            <div class="flex items-center gap-3">
               <Avatar class="size-9 shrink-0 rounded-full">
                 <AvatarFallback class="rounded-full bg-primary/10 text-[12px] font-semibold text-primary">
                   {{ initials(row.agent.name) }}
@@ -248,7 +324,7 @@ function failureClass(rate: number): string {
                   {{ row.agent.goal }}
                 </div>
               </div>
-            </NuxtLink>
+            </div>
           </TableCell>
 
           <TableCell>

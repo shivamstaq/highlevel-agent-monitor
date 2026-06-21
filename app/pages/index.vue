@@ -22,7 +22,8 @@ import { useApi } from '~/composables/useApi'
 import { useBreadcrumb } from '~/composables/useBreadcrumb'
 import { scoreToneName, type Tone } from '~/composables/useTone'
 
-useHead({ title: 'Overview · Voice AI Copilot' })
+// Page-specific title only; app.vue's titleTemplate appends "· Voice AI Copilot".
+useHead({ title: 'Overview' })
 
 // Overview is the root crumb; the layout renders "Overview" itself, so the
 // page-supplied trail stays empty.

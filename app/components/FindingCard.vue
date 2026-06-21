@@ -6,6 +6,7 @@ import SectionCard from '~/components/SectionCard.vue'
 import SeverityBadge from '~/components/SeverityBadge.vue'
 import { useTone } from '~/composables/useTone'
 import { cn } from '~/lib/utils'
+import { toSentenceCase } from '~/lib/format'
 
 const props = defineProps<{
   finding: Finding
@@ -34,6 +35,13 @@ const typeMeta = computed(() => {
 
 /** Severity token set tints the icon chip + (when active) the ring. */
 const tone = computed(() => severityTone(props.finding.severity))
+
+/**
+ * Display-only title normalization (P15) — keep finding titles in the locked
+ * sentence-case scale even when the model emits Title Case. Presentation
+ * transform only; the underlying `finding.title` data is untouched.
+ */
+const displayTitle = computed(() => toSentenceCase(props.finding.title))
 
 const hasEvidence = computed(() => (props.finding.evidenceTurnIdxs?.length ?? 0) > 0)
 
@@ -77,7 +85,7 @@ const evidenceLabel = computed(() => {
           <SeverityBadge :severity="finding.severity" />
         </div>
         <p class="text-sm font-semibold leading-snug">
-          {{ finding.title }}
+          {{ displayTitle }}
         </p>
         <p class="text-sm leading-relaxed text-muted-foreground">
           {{ finding.detail }}

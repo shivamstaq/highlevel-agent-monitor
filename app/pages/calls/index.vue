@@ -75,6 +75,11 @@ function clearFilters() {
   applyQuery({ agentId: undefined, severity: undefined, outcome: undefined })
 }
 
+/** Drop just the agent scope, keeping any severity/outcome filters (R3-09). */
+function clearAgentFilter() {
+  applyQuery({ agentId: undefined })
+}
+
 /* ----------------------------------------------------------------------------
  * Data. The list refetches whenever a filter changes (watched query keys).
  * Agent options come from the fleet rollup so the agent filter is a real
@@ -312,6 +317,32 @@ useHead({ title: computed(() => (activeAgentName.value ? `Calls · ${activeAgent
         </Button>
       </div>
     </SectionCard>
+
+    <!-- Active agent scope chip (R3-09) — mirrors /recommendations. The agent
+         name links to its detail page; the X removes just the agent scope and
+         keeps any severity/outcome filters in place. -->
+    <div
+      v-if="agentId"
+      class="flex flex-wrap items-center gap-2"
+    >
+      <span class="text-[12px] font-medium text-muted-foreground">Filtered to</span>
+      <span class="inline-flex items-center gap-1.5 rounded-full border bg-muted/60 py-1 pl-3 pr-1.5 text-[12px] font-medium">
+        <NuxtLink
+          :to="`/agents/${agentId}`"
+          class="truncate rounded-sm text-primary hover:underline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary"
+        >
+          {{ activeAgentName ?? 'this agent' }}
+        </NuxtLink>
+        <button
+          type="button"
+          class="inline-flex size-4 items-center justify-center rounded-full text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-primary"
+          @click="clearAgentFilter"
+        >
+          <X class="size-3.5" />
+          <span class="sr-only">Remove agent filter</span>
+        </button>
+      </span>
+    </div>
 
     <!-- Error -->
     <Alert

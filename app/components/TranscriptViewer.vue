@@ -109,7 +109,13 @@ function onTurnClick(idx: number) {
 </script>
 
 <template>
-  <ScrollArea class="h-[calc(100svh-13rem)] pr-4">
+  <!--
+    R3-03: the inner scroll viewport must stay usable on phone, where the call
+    header wraps taller (the old hardcoded 100svh-13rem could collapse to a
+    sliver). Reserve a larger offset below sm and floor the height so the
+    transcript always has a comfortable scrollable area on a 390px screen.
+  -->
+  <ScrollArea class="h-[max(20rem,calc(100svh-19rem))] pr-4 sm:h-[calc(100svh-13rem)]">
     <div class="flex flex-col gap-4 py-1">
       <component
         :is="isSelectable ? 'button' : 'div'"
@@ -139,9 +145,15 @@ function onTurnClick(idx: number) {
           />
         </div>
 
+        <!--
+          R3-03 phone overflow fix: the bubble column is capped to the space
+          left after the size-8 avatar + gap-3 (2.75rem) so it can never exceed
+          the container and force horizontal clipping at 390px. On wider panes
+          it keeps the comfortable 82% conversational max-width.
+        -->
         <div
           :class="cn(
-            'flex max-w-[82%] flex-col gap-1',
+            'flex min-w-0 max-w-[calc(100%-2.75rem)] flex-col gap-1 sm:max-w-[82%]',
             turn.speaker === 'customer' && 'items-end'
           )"
         >
@@ -162,7 +174,7 @@ function onTurnClick(idx: number) {
           -->
           <div
             :class="cn(
-              'rounded-md border px-3.5 py-2.5 text-sm leading-relaxed transition-colors duration-[var(--dur)] ease-[var(--ease)]',
+              'max-w-full overflow-hidden rounded-md border px-3.5 py-2.5 text-sm leading-relaxed [overflow-wrap:anywhere] transition-colors duration-[var(--dur)] ease-[var(--ease)]',
               turn.speaker === 'agent'
                 ? 'rounded-tl-sm bg-card'
                 : 'rounded-tr-sm border-transparent bg-secondary text-secondary-foreground',

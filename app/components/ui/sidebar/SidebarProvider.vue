@@ -2,7 +2,7 @@
 import type { HTMLAttributes, Ref } from 'vue'
 import { defaultDocument, useEventListener, useMediaQuery, useVModel } from '@vueuse/core'
 import { TooltipProvider } from 'reka-ui'
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { cn } from '~/lib/utils'
 import { provideSidebarContext, SIDEBAR_COOKIE_MAX_AGE, SIDEBAR_COOKIE_NAME, SIDEBAR_KEYBOARD_SHORTCUT, SIDEBAR_WIDTH, SIDEBAR_WIDTH_ICON } from './utils'
 
@@ -19,7 +19,25 @@ const emits = defineEmits<{
   'update:open': [open: boolean]
 }>()
 
-const isMobile = useMediaQuery('(max-width: 768px)')
+/**
+ * Hydration-safe mobile detection (R3-08).
+ *
+ * `useMediaQuery` reports `false` during SSR (no `window`), so the server always
+ * renders Sidebar's desktop branch. On a narrow client viewport the raw query
+ * flips to `true` immediately, which made Sidebar's `v-else-if="isMobile"` Sheet
+ * branch replace the server's desktop `v-else` branch on the very first client
+ * render — a Vue hydration mismatch that threw on every page.
+ *
+ * We gate the exposed `isMobile` behind a `hydrated` flag that only flips inside
+ * `onMounted` (after hydration). The first client render therefore matches the
+ * server (desktop), and the app deterministically switches to the mobile Sheet
+ * one tick later. `rawIsMobile` stays live so the switch is correct post-mount. */
+const rawIsMobile = useMediaQuery('(max-width: 768px)')
+const hydrated = ref(false)
+onMounted(() => {
+  hydrated.value = true
+})
+const isMobile = computed(() => hydrated.value && rawIsMobile.value)
 const openMobile = ref(false)
 
 const open = useVModel(props, 'open', emits, {

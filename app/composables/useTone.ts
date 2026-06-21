@@ -23,24 +23,46 @@ export interface ToneClasses {
   badge: string
 }
 
+/**
+ * Badge foreground (P22 — WCAG contrast).
+ *
+ * The `-soft` badge backgrounds are near-white in light mode (oklch L≈0.95) and
+ * deep low-chroma tints in dark mode. Painting the badge LABEL with the matching
+ * `text-<tone>` base failed AA badly in light mode — measured ~2.0:1 for warning,
+ * ~3.0:1 success, ~4.0:1 danger against their soft backgrounds — so "Awaiting
+ * review", drift labels, the use-action chip, etc. were unreadable.
+ *
+ * The `-foreground` tokens don't solve this uniformly: in LIGHT mode only
+ * `--warning-foreground` is dark (success/danger foregrounds are near-white,
+ * intended as text on the SOLID base), and in DARK mode every `-foreground` is
+ * dark (wrong on the dark soft tint). The base `text-<tone>` is the readable one
+ * in dark mode (≈5–7:1) but fails in light.
+ *
+ * The neutral page `--foreground` token is the one foreground that is dark in
+ * light and bright in dark, so it clears AA on every soft badge in BOTH modes
+ * with a wide margin (measured 13–17:1). The tone identity is still carried by
+ * the `-soft` background + the solid dot/bar — only the small label text is
+ * neutralized to guarantee legibility. One change, every chip app-wide. */
+const BADGE_FOREGROUND = 'text-foreground'
+
 const TONE_CLASSES: Record<Tone, ToneClasses> = {
   success: {
     text: 'text-success',
     bg: 'bg-success-soft',
     dot: 'bg-success',
-    badge: 'bg-success-soft text-success'
+    badge: `bg-success-soft ${BADGE_FOREGROUND}`
   },
   warning: {
     text: 'text-warning',
     bg: 'bg-warning-soft',
     dot: 'bg-warning',
-    badge: 'bg-warning-soft text-warning'
+    badge: `bg-warning-soft ${BADGE_FOREGROUND}`
   },
   danger: {
     text: 'text-danger',
     bg: 'bg-danger-soft',
     dot: 'bg-danger',
-    badge: 'bg-danger-soft text-danger'
+    badge: `bg-danger-soft ${BADGE_FOREGROUND}`
   },
   neutral: {
     text: 'text-muted-foreground',

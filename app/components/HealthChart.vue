@@ -108,5 +108,30 @@ const tooltipTemplate = (d: { date: string, score: number }) =>
     >
       No analysis history yet.
     </div>
+
+    <!--
+      R3-12: before the client-only Unovis chart mounts there is a ~2s window
+      where nothing was drawn (empty card / blank flash). Render a subtle
+      skeleton — faux y-axis ticks + a gently pulsing line band — so the card
+      reads as "loading a chart", not broken whitespace. Motion-safe + aria-hidden.
+    -->
+    <div
+      v-else
+      class="flex h-full w-full gap-3 pb-7 pt-3 pl-2"
+      aria-hidden="true"
+    >
+      <div class="flex w-7 shrink-0 flex-col justify-between py-1">
+        <div
+          v-for="n in 4"
+          :key="n"
+          class="h-2 w-5 rounded bg-muted motion-safe:animate-pulse"
+        />
+      </div>
+      <div class="relative flex-1 overflow-hidden rounded-md bg-muted/40">
+        <div class="absolute inset-x-0 bottom-1/3 h-px bg-muted-foreground/15" />
+        <div class="absolute inset-x-0 top-1/2 h-px bg-muted-foreground/10" />
+        <div class="absolute inset-x-2 bottom-1/4 h-8 rounded-md bg-muted/70 motion-safe:animate-pulse" />
+      </div>
+    </div>
   </div>
 </template>

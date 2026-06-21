@@ -157,6 +157,26 @@ function onSelectTurn(turnIdx: number) {
 const criterionLabel = (criterionId: string) =>
   agent.value?.successCriteria.find(c => c.id === criterionId)?.label ?? criterionId
 
+/**
+ * Per-criterion Progress bar tone (R3-04/P20). The indicator was teal for every
+ * criterion, so a failed criterion (red dot + red number, score 0–20) still
+ * showed a teal/healthy bar that softened the red-flag result. Tone the
+ * indicator AND a chroma-matched soft track by the criterion's own score band —
+ * exactly like FlowDrift's conformance bar — so the bar reinforces the dot +
+ * number instead of contradicting them. Override only the indicator fill via the
+ * data-slot selector so we keep using the shared <Progress> + useTone, never raw
+ * color utilities.
+ */
+function criterionBarClass(score: number): string {
+  const tone = scoreToneName(score)
+  return cn(
+    scoreToneSet(score).bg,
+    tone === 'success' && '[&_[data-slot=progress-indicator]]:bg-success',
+    tone === 'warning' && '[&_[data-slot=progress-indicator]]:bg-warning',
+    tone === 'danger' && '[&_[data-slot=progress-indicator]]:bg-danger'
+  )
+}
+
 /* ----------------------------------------------------------------------------
  * P12 — always-visible compact Flow adherence summary.
  *
@@ -483,7 +503,7 @@ const rescoringClass = computed(() =>
                     </div>
                     <Progress
                       :model-value="cs.score"
-                      class="h-1.5"
+                      :class="cn('h-1.5', criterionBarClass(cs.score))"
                     />
                   </div>
                 </div>
@@ -712,7 +732,7 @@ const rescoringClass = computed(() =>
            CallTimeline renders standalone — no second header. -->
       <SectionCard
         v-if="timeline"
-        title="Voice Pipeline Timeline"
+        title="Voice pipeline timeline"
         description="Where latency is spent across the realtime pipeline — caller, STT/VAD, endpoint, LLM, TTS, agent. Per-stage timing is modeled (reconstructed from published budgets, scaled to this call's real duration), not directly measured."
         padding="dense"
         :class="rescoringClass"

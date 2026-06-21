@@ -1,23 +1,28 @@
 <script setup lang="ts">
 import type { Component } from 'vue'
 import { computed } from 'vue'
-import { VisArea, VisLine, VisSingleContainer } from '@unovis/vue'
 import SectionCard from '~/components/SectionCard.vue'
 import { useTone, type Tone } from '~/composables/useTone'
 import { cn } from '~/lib/utils'
 
 /**
- * KpiCard — standardized KPI anatomy (W13, honesty-revised per P02/P27).
- * Every KPI shares one structure: label (12/500) · metric (30/600 tabular) ·
- * neutral icon chip · OPTIONAL delta line · OPTIONAL sparkline.
+ * KpiCard — standardized KPI anatomy (W13, honesty-revised per P02/P27/R3-11).
+ * Every KPI shares ONE uniform structure: label (12/500) · metric (30/600
+ * tabular) · neutral icon chip · OPTIONAL delta line.
  *
- * Honesty-first: a delta and a sparkline are rendered ONLY when a real,
- * honest one is supplied. The card NEVER fabricates a "vs. yesterday" or a
- * stub trend to fill space — an absent delta simply collapses (the row is no
- * longer force-reserved), and the four KPIs still align because they ALL omit
- * the row when none has an honest delta. Pass `delta` only when the compared
- * values are genuinely adjacent + recent; otherwise let the dedicated trend
- * strip below carry the series (P02).
+ * R3-11: the per-card sparkline is DROPPED. With only ~3 trend points a lone
+ * inline spark degenerates into a faint vertical stub that reads as broken, and
+ * only one KPI ever carried it — inconsistent anatomy. The dedicated trend strip
+ * below the KPI row already carries the series, so the cleaner uniform choice is
+ * no inline spark on any card. (`spark` is still accepted for back-compat but
+ * intentionally not rendered.)
+ *
+ * Honesty-first: a delta is rendered ONLY when a real, honest one is supplied.
+ * The card NEVER fabricates a "vs. yesterday" to fill space — an absent delta
+ * simply collapses, and the four KPIs still align because they ALL omit the row
+ * when none has an honest delta. Pass `delta` only when the compared values are
+ * genuinely adjacent + recent; otherwise let the dedicated trend strip carry the
+ * series (P02).
  *
  * Color discipline: the icon chip is neutral by default; accent/status tint
  * is applied ONLY when the metric is in a warning/critical band (via `tone`),
@@ -38,7 +43,11 @@ const props = withDefaults(defineProps<{
    * 'warning' / 'danger' tint the metric + chip; 'success' tints the metric.
    */
   tone?: Tone
-  /** Optional sparkline series (y-values). Shown ONLY when ≥ 2 real points. */
+  /**
+   * @deprecated R3-11 — no longer rendered. A 3-point inline spark read as a
+   * broken stub; the dedicated trend strip carries the series. Accepted only so
+   * existing callers don't break; safe to remove from call sites.
+   */
   spark?: number[]
   /** Skeleton state matching the loaded layout. */
   loading?: boolean
@@ -47,11 +56,6 @@ const props = withDefaults(defineProps<{
 })
 
 const { toneClasses } = useTone()
-
-const sparkData = computed(() => (props.spark ?? []).map((y, x) => ({ x, y })))
-
-/** Show the sparkline only when there are ≥ 2 honest points to draw a trend. */
-const hasSpark = computed(() => sparkData.value.length > 1)
 
 /** Render a delta only when a real, non-empty honest string is supplied. */
 const hasDelta = computed(() => {
@@ -108,33 +112,10 @@ const deltaClass = computed(() =>
         </span>
       </div>
 
-      <div class="flex items-end justify-between gap-3">
+      <div class="flex items-end gap-3">
         <span :class="cn('text-[30px] font-semibold leading-none tracking-tight tabular-nums', metricClass)">
           {{ value }}
         </span>
-
-        <div
-          v-if="hasSpark"
-          class="h-9 w-24 shrink-0 self-end text-primary/70"
-        >
-          <VisSingleContainer
-            :data="sparkData"
-            :height="36"
-          >
-            <VisArea
-              :x="(d: { x: number }) => d.x"
-              :y="(d: { y: number }) => d.y"
-              color="currentColor"
-              :opacity="0.18"
-            />
-            <VisLine
-              :x="(d: { x: number }) => d.x"
-              :y="(d: { y: number }) => d.y"
-              color="currentColor"
-              :line-width="1.5"
-            />
-          </VisSingleContainer>
-        </div>
       </div>
 
       <!--

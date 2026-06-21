@@ -12,7 +12,7 @@ import {
 } from '~/components/ui/table'
 import SeverityBadge from '~/components/SeverityBadge.vue'
 import { useTone } from '~/composables/useTone'
-import { humanizeOutcome } from '~/lib/format'
+import { humanizeOutcome, relativeTime as relativeTimeFmt } from '~/lib/format'
 import { cn } from '~/lib/utils'
 
 /**
@@ -106,22 +106,9 @@ const rows = computed(() => {
 
 const rowHeight = computed(() => (props.dense ? 'h-11' : 'h-12'))
 
-/** SSR-safe relative time — no Intl locale drift between server + client. */
+/** SSR-safe relative time — shared formatter (no Intl locale drift). */
 function relativeTime(iso: string): string {
-  const then = new Date(iso).getTime()
-  if (Number.isNaN(then)) return '—'
-  const diffSec = Math.round((Date.now() - then) / 1000)
-  const abs = Math.abs(diffSec)
-  if (abs < 60) return 'just now'
-  const mins = Math.round(diffSec / 60)
-  if (Math.abs(mins) < 60) return `${mins}m ago`
-  const hrs = Math.round(diffSec / 3600)
-  if (Math.abs(hrs) < 24) return `${hrs}h ago`
-  const days = Math.round(diffSec / 86400)
-  if (Math.abs(days) < 7) return `${days}d ago`
-  const weeks = Math.round(days / 7)
-  if (Math.abs(weeks) < 5) return `${weeks}w ago`
-  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+  return relativeTimeFmt(iso)
 }
 
 function fullTimestamp(iso: string): string {
@@ -135,7 +122,83 @@ function contactLabel(item: CallListItem): string {
 </script>
 
 <template>
-  <div class="overflow-hidden rounded-xl border">
+  <!--
+    R3-01 phone-first reflow: BELOW sm we do NOT render the fixed multi-column
+    table (it crushed text + smeared headers + forced h-scroll at 390px).
+    Instead each call is a 2-line stacked, full-width row — the whole row a
+    NuxtLink to /calls/:id with a visible focus ring, no horizontal scroll.
+    At sm+ the data table renders (Direction/Findings/Outcome only at lg).
+  -->
+  <div class="overflow-hidden rounded-xl border sm:hidden">
+    <ul
+      v-if="rows.length"
+      class="divide-y"
+    >
+      <li
+        v-for="item in rows"
+        :key="item.call.id"
+      >
+        <NuxtLink
+          :to="`/calls/${item.call.id}`"
+          class="flex items-center gap-3 px-4 py-3 focus-visible:outline-2 focus-visible:outline-primary -outline-offset-2 motion-safe:transition-colors active:bg-muted/50"
+        >
+          <div class="min-w-0 flex-1">
+            <div class="flex items-baseline justify-between gap-2">
+              <span class="truncate text-sm font-medium">{{ contactLabel(item) }}</span>
+              <span
+                v-if="item.score != null"
+                :class="cn('shrink-0 text-sm font-semibold tabular-nums', scoreTone(item.score))"
+              >{{ Math.round(item.score) }}</span>
+              <span
+                v-else
+                class="shrink-0 text-[12px] text-muted-foreground"
+              >Not scored</span>
+            </div>
+            <div class="mt-0.5 flex min-w-0 items-center gap-1.5 text-[12px] text-muted-foreground">
+              <span
+                v-if="showAgent"
+                class="truncate"
+              >{{ item.agentName }}</span>
+              <span
+                v-if="showAgent"
+                aria-hidden="true"
+              >·</span>
+              <time
+                :datetime="item.call.startedAt"
+                class="shrink-0 tabular-nums"
+              >{{ relativeTime(item.call.startedAt) }}</time>
+              <span
+                aria-hidden="true"
+              >·</span>
+              <SeverityBadge
+                :severity="item.topSeverity"
+                :subtle="!item.topSeverity"
+                class="shrink-0"
+              />
+            </div>
+          </div>
+          <ChevronRight class="size-4 shrink-0 text-muted-foreground" />
+        </NuxtLink>
+      </li>
+    </ul>
+
+    <div
+      v-else
+      class="flex flex-col items-center justify-center gap-2 px-4 py-12 text-center"
+    >
+      <div class="flex size-10 items-center justify-center rounded-full bg-muted text-muted-foreground">
+        <Inbox class="size-5" />
+      </div>
+      <p class="text-sm font-semibold">
+        {{ emptyTitle }}
+      </p>
+      <p class="max-w-xs text-sm text-muted-foreground">
+        {{ emptyHint }}
+      </p>
+    </div>
+  </div>
+
+  <div class="hidden overflow-hidden rounded-xl border sm:block">
     <Table fixed>
       <TableHeader>
         <TableRow class="bg-muted/40 hover:bg-muted/40">
@@ -191,7 +254,7 @@ function contactLabel(item: CallListItem): string {
           </TableHead>
 
           <TableHead
-            class="w-[15%] min-w-[120px]"
+            class="hidden w-[15%] min-w-[120px] lg:table-cell"
             :aria-sort="ariaSort('outcome')"
           >
             <button
@@ -215,7 +278,7 @@ function contactLabel(item: CallListItem): string {
             </button>
           </TableHead>
 
-          <TableHead class="hidden w-[120px] sm:table-cell">
+          <TableHead class="hidden w-[120px] lg:table-cell">
             Direction
           </TableHead>
 
@@ -245,7 +308,7 @@ function contactLabel(item: CallListItem): string {
           </TableHead>
 
           <TableHead
-            class="hidden w-[88px] text-right md:table-cell"
+            class="hidden w-[88px] text-right lg:table-cell"
             :aria-sort="ariaSort('findings')"
           >
             <button
@@ -327,16 +390,25 @@ function contactLabel(item: CallListItem): string {
         <TableRow
           v-for="item in rows"
           :key="item.call.id"
-          :class="cn('group cursor-pointer', rowHeight)"
+          :class="cn('group relative cursor-pointer', rowHeight)"
         >
-          <TableCell class="max-w-0 p-0">
+          <TableCell class="max-w-0">
+            <!--
+              R3-06: full-row click-through via a stretched-link overlay. ONE
+              NuxtLink per row (one tab stop, keyboard + SR reachable) is
+              absolutely positioned to cover the entire row; its focus-visible
+              ring draws on the whole row. Cells with their own interactive
+              content (none here) would need relative+z to sit above it.
+            -->
             <NuxtLink
               :to="`/calls/${item.call.id}`"
+              :aria-label="`Open call · ${contactLabel(item)}`"
+              class="absolute inset-0 z-0 rounded-md focus-visible:outline-2 focus-visible:outline-primary -outline-offset-2"
+            />
+            <span
+              class="block truncate font-medium"
               :title="contactLabel(item)"
-              :class="cn('flex items-center px-4 font-medium focus-visible:outline-2 focus-visible:outline-primary -outline-offset-2', rowHeight)"
-            >
-              <span class="truncate">{{ contactLabel(item) }}</span>
-            </NuxtLink>
+            >{{ contactLabel(item) }}</span>
           </TableCell>
 
           <TableCell
@@ -349,7 +421,7 @@ function contactLabel(item: CallListItem): string {
             >{{ item.agentName }}</span>
           </TableCell>
 
-          <TableCell class="max-w-0">
+          <TableCell class="hidden max-w-0 lg:table-cell">
             <span
               v-if="item.call.outcome"
               class="block truncate text-sm"
@@ -361,7 +433,7 @@ function contactLabel(item: CallListItem): string {
             >—</span>
           </TableCell>
 
-          <TableCell class="hidden sm:table-cell">
+          <TableCell class="hidden lg:table-cell">
             <span class="inline-flex items-center gap-1.5 text-sm text-muted-foreground">
               <PhoneIncoming
                 v-if="item.call.direction === 'inbound'"
@@ -385,7 +457,7 @@ function contactLabel(item: CallListItem): string {
             </time>
           </TableCell>
 
-          <TableCell class="hidden text-right tabular-nums md:table-cell">
+          <TableCell class="hidden text-right tabular-nums lg:table-cell">
             <span :class="item.findingCount ? 'font-medium' : 'text-muted-foreground'">
               {{ item.findingCount }}
             </span>

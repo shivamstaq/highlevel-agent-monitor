@@ -7,6 +7,7 @@ import { Badge } from '~/components/ui/badge'
 import { Button } from '~/components/ui/button'
 import SeverityBadge from '~/components/SeverityBadge.vue'
 import { cn } from '~/lib/utils'
+import { toSentenceCase } from '~/lib/format'
 
 /**
  * RecommendationCard — heterogeneous fix card (title + rationale + paste-ready
@@ -34,6 +35,14 @@ const props = withDefaults(defineProps<{
 })
 
 const rec = computed<Recommendation | undefined>(() => props.recommendation ?? props.item?.recommendation)
+
+/**
+ * Display-only title normalization (P15). Model-authored titles drift between
+ * Title Case and sentence case in the same grid; normalize on render so the
+ * fix-queue reads consistently. This is a presentation transform — the raw
+ * `rec.title` data is never mutated.
+ */
+const displayTitle = computed(() => toSentenceCase(rec.value?.title))
 
 const callId = computed(() => props.sourceCallId ?? props.item?.callId)
 const agentId = computed(() => props.sourceAgentId ?? props.item?.agentId)
@@ -119,7 +128,7 @@ async function copy() {
           </span>
         </div>
         <p class="text-sm font-semibold leading-snug">
-          {{ rec.title }}
+          {{ displayTitle }}
         </p>
       </div>
 
