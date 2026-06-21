@@ -7,7 +7,7 @@
  */
 import { getAgent, getAnalysis, listCalls } from '../../services/db'
 import { computeAgentHealth, toCallListItem, topRecommendations } from '../../utils/rollup'
-import type { AgentHealth, Analysis, CallListItem, FlowNodeKind, Recommendation } from '#shared/types'
+import type { AgentHealth, Analysis, Call, CallListItem, FlowNodeKind, RecommendationItem } from '#shared/types'
 
 /** Aggregate flow-conformance drift across an agent's analyzed calls (the flywheel signal). */
 export interface FlowDriftSummary {
@@ -19,7 +19,7 @@ export interface FlowDriftSummary {
 export default defineEventHandler(async (event): Promise<{
   health: AgentHealth
   calls: CallListItem[]
-  recommendations: Recommendation[]
+  recommendations: RecommendationItem[]
   flowSummary: FlowDriftSummary
 }> => {
   const id = getRouterParam(event, 'id')
@@ -44,7 +44,12 @@ export default defineEventHandler(async (event): Promise<{
   const callItems = calls.map(call =>
     toCallListItem(call, agent.name, analysesByCallId.get(call.id) ?? null)
   )
-  const recommendations = topRecommendations([...analysesByCallId.values()])
+  const callsById = new Map<string, Call>(calls.map(c => [c.id, c]))
+  const recommendations = topRecommendations(
+    [...analysesByCallId.values()],
+    6,
+    { agentsById: new Map([[agent.id, agent]]), callsById }
+  )
   const flowSummary = summarizeFlowDrift([...analysesByCallId.values()])
 
   return { health, calls: callItems, recommendations, flowSummary }

@@ -1,20 +1,40 @@
 <script setup lang="ts">
 import type { UseAction, UseActionKind } from '#shared/types'
-import { Eye, GraduationCap, PhoneForwarded, PencilLine } from 'lucide-vue-next'
-import { Badge } from '~/components/ui/badge'
+import { computed } from 'vue'
+import { Eye, GraduationCap, PhoneForwarded, Wrench } from 'lucide-vue-next'
+import { useTone } from '~/composables/useTone'
+import { cn } from '~/lib/utils'
 
-defineProps<{
+const props = withDefaults(defineProps<{
   useActions: UseAction[]
-}>()
+  /** Optional: highlight the use-action whose range is currently focused. */
+  activeRange?: [number, number] | null
+}>(), {
+  activeRange: null
+})
 
 defineEmits<{ (e: 'focus', range: [number, number]): void }>()
 
-const kindMeta: Record<UseActionKind, { label: string, icon: typeof Eye, cls: string }> = {
-  review: { label: 'Review', icon: Eye, cls: 'text-sky-600 dark:text-sky-400' },
-  coach_agent: { label: 'Coach agent', icon: GraduationCap, cls: 'text-violet-600 dark:text-violet-400' },
-  update_script: { label: 'Update script', icon: PencilLine, cls: 'text-amber-600 dark:text-amber-400' },
-  escalate: { label: 'Escalate', icon: PhoneForwarded, cls: 'text-red-600 dark:text-red-400' }
+const { toneClasses } = useTone()
+
+/**
+ * Use Action kind -> icon + tone. Tone routes through useTone semantic tokens
+ * (no raw sky-/violet-/amber-/red utilities): escalate = danger, update_script
+ * = warning, coach_agent / review = neutral.
+ */
+const kindMeta: Record<UseActionKind, { label: string, icon: typeof Eye, tone: ReturnType<typeof toneClasses> }> = {
+  review: { label: 'Review', icon: Eye, tone: toneClasses('neutral') },
+  coach_agent: { label: 'Coach agent', icon: GraduationCap, tone: toneClasses('neutral') },
+  update_script: { label: 'Update script', icon: Wrench, tone: toneClasses('warning') },
+  escalate: { label: 'Escalate', icon: PhoneForwarded, tone: toneClasses('danger') }
 }
+
+function isActive(ua: UseAction): boolean {
+  const r = props.activeRange
+  return !!r && r[0] === ua.turnRange[0] && r[1] === ua.turnRange[1]
+}
+
+const sorted = computed(() => props.useActions)
 </script>
 
 <template>
@@ -23,13 +43,22 @@ const kindMeta: Record<UseActionKind, { label: string, icon: typeof Eye, cls: st
     class="flex flex-col gap-2"
   >
     <button
-      v-for="ua in useActions"
+      v-for="ua in sorted"
       :key="ua.id"
       type="button"
-      class="group flex items-start gap-3 rounded-lg border bg-card p-3 text-left transition-colors hover:border-foreground/20 hover:bg-accent/40"
+      :aria-pressed="isActive(ua)"
+      :class="cn(
+        'group flex items-start gap-3 rounded-md border bg-card p-3 text-left outline-none transition-colors duration-[var(--dur)] ease-[var(--ease)] hover:border-foreground/20 hover:bg-accent/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary',
+        isActive(ua) && 'border-primary/60 ring-1 ring-primary/40'
+      )"
       @click="$emit('focus', ua.turnRange)"
     >
-      <span :class="['mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md bg-muted', kindMeta[ua.recommendedAction].cls]">
+      <span
+        :class="cn(
+          'mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md',
+          kindMeta[ua.recommendedAction].tone.badge
+        )"
+      >
         <component
           :is="kindMeta[ua.recommendedAction].icon"
           class="size-3.5"
@@ -37,13 +66,10 @@ const kindMeta: Record<UseActionKind, { label: string, icon: typeof Eye, cls: st
       </span>
       <div class="flex min-w-0 flex-col gap-1">
         <div class="flex items-center gap-2">
-          <span class="text-sm font-medium">{{ kindMeta[ua.recommendedAction].label }}</span>
-          <Badge
-            variant="outline"
-            class="font-mono text-[10px]"
-          >
-            turns {{ ua.turnRange[0] }}–{{ ua.turnRange[1] }}
-          </Badge>
+          <span class="text-sm font-semibold">{{ kindMeta[ua.recommendedAction].label }}</span>
+          <span class="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-muted-foreground">
+            turns {{ ua.turnRange[0] }}&ndash;{{ ua.turnRange[1] }}
+          </span>
         </div>
         <p class="text-sm leading-snug text-muted-foreground">
           {{ ua.reason }}
@@ -51,10 +77,18 @@ const kindMeta: Record<UseActionKind, { label: string, icon: typeof Eye, cls: st
       </div>
     </button>
   </div>
-  <p
+  <div
     v-else
-    class="text-sm text-muted-foreground"
+    class="flex flex-col items-center gap-1.5 px-4 py-8 text-center"
   >
-    No use-actions flagged for this call.
-  </p>
+    <span class="flex size-9 items-center justify-center rounded-full bg-muted text-muted-foreground">
+      <Wrench class="size-4" />
+    </span>
+    <p class="text-sm font-semibold">
+      No Use Actions for this call
+    </p>
+    <p class="max-w-xs text-sm text-muted-foreground">
+      Nothing here needs a human follow-up. Re-run analysis to refresh if the transcript changed.
+    </p>
+  </div>
 </template>

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { AgentHealth } from '#shared/types'
 import { computed, ref } from 'vue'
-import { ArrowDownUp, ChevronRight } from 'lucide-vue-next'
+import { ArrowDown, ArrowDownUp, ArrowUp, ChevronRight } from 'lucide-vue-next'
 import {
   Table,
   TableBody,
@@ -11,13 +11,21 @@ import {
   TableRow
 } from '~/components/ui/table'
 import { Avatar, AvatarFallback } from '~/components/ui/avatar'
-import { Progress } from '~/components/ui/progress'
 import { Badge } from '~/components/ui/badge'
+import { useTone } from '~/composables/useTone'
 import { cn } from '~/lib/utils'
 
+/**
+ * AgentTable — the shared roster data table (Overview preview + /agents).
+ * ~48px comfortable rows, full-row NuxtLink drill-down (keyboard reachable),
+ * sortable headers with aria-sort + directional arrows, status bars/badges
+ * routed through useTone (no raw emerald-/amber-/red-NNN utilities).
+ */
 const props = defineProps<{
   agents: AgentHealth[]
 }>()
+
+const { scoreToneSet, scoreBandLabel, toneClasses } = useTone()
 
 type SortKey = 'name' | 'avgScore' | 'failureRate' | 'openUseActions'
 const sortKey = ref<SortKey>('avgScore')
@@ -28,8 +36,14 @@ function toggleSort(key: SortKey) {
     sortAsc.value = !sortAsc.value
   } else {
     sortKey.value = key
+    // text column defaults A→Z; numeric columns default high→low first
     sortAsc.value = key === 'name'
   }
+}
+
+function ariaSort(key: SortKey): 'ascending' | 'descending' | 'none' {
+  if (sortKey.value !== key) return 'none'
+  return sortAsc.value ? 'ascending' : 'descending'
 }
 
 const rows = computed(() => {
@@ -50,14 +64,13 @@ const rows = computed(() => {
   return list
 })
 
-function healthTone(score: number): { label: string, cls: string, bar: string } {
-  if (score >= 80) return { label: 'Healthy', cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300', bar: 'bg-emerald-500' }
-  if (score >= 60) return { label: 'At risk', cls: 'bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300', bar: 'bg-amber-500' }
-  return { label: 'Critical', cls: 'bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300', bar: 'bg-red-500' }
-}
-
 function initials(name: string): string {
   return name.split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase()
+}
+
+/** Failure-rate tone: any failures = danger foreground, else neutral. */
+function failureClass(rate: number): string {
+  return rate > 0 ? toneClasses('danger').text : 'text-muted-foreground'
 }
 </script>
 
@@ -66,105 +79,213 @@ function initials(name: string): string {
     <Table>
       <TableHeader>
         <TableRow class="bg-muted/40 hover:bg-muted/40">
-          <TableHead>
+          <TableHead :aria-sort="ariaSort('name')">
             <button
-              class="flex items-center gap-1 font-medium"
+              type="button"
+              :class="cn(
+                'flex items-center gap-1 rounded-md font-medium focus-visible:outline-2 focus-visible:outline-primary',
+                sortKey === 'name' ? 'text-foreground' : 'text-muted-foreground'
+              )"
               @click="toggleSort('name')"
             >
-              Agent <ArrowDownUp class="size-3 text-muted-foreground" />
+              <span class="text-foreground">Agent</span>
+              <ArrowUp
+                v-if="sortKey === 'name' && sortAsc"
+                class="size-3 text-primary"
+              />
+              <ArrowDown
+                v-else-if="sortKey === 'name'"
+                class="size-3 text-primary"
+              />
+              <ArrowDownUp
+                v-else
+                class="size-3 text-muted-foreground"
+              />
             </button>
           </TableHead>
+
           <TableHead>Status</TableHead>
-          <TableHead class="w-[200px]">
+
+          <TableHead
+            class="w-[200px]"
+            :aria-sort="ariaSort('avgScore')"
+          >
             <button
-              class="flex items-center gap-1 font-medium"
+              type="button"
+              class="flex items-center gap-1 rounded-md font-medium focus-visible:outline-2 focus-visible:outline-primary"
               @click="toggleSort('avgScore')"
             >
-              Avg score <ArrowDownUp class="size-3 text-muted-foreground" />
+              Avg score
+              <ArrowUp
+                v-if="sortKey === 'avgScore' && sortAsc"
+                class="size-3 text-primary"
+              />
+              <ArrowDown
+                v-else-if="sortKey === 'avgScore'"
+                class="size-3 text-primary"
+              />
+              <ArrowDownUp
+                v-else
+                class="size-3 text-muted-foreground"
+              />
             </button>
           </TableHead>
-          <TableHead class="text-right">
+
+          <TableHead
+            class="text-right"
+            :aria-sort="ariaSort('failureRate')"
+          >
             <button
-              class="ml-auto flex items-center gap-1 font-medium"
+              type="button"
+              class="ml-auto flex items-center gap-1 rounded-md font-medium focus-visible:outline-2 focus-visible:outline-primary"
               @click="toggleSort('failureRate')"
             >
-              Failures <ArrowDownUp class="size-3 text-muted-foreground" />
+              Failures
+              <ArrowUp
+                v-if="sortKey === 'failureRate' && sortAsc"
+                class="size-3 text-primary"
+              />
+              <ArrowDown
+                v-else-if="sortKey === 'failureRate'"
+                class="size-3 text-primary"
+              />
+              <ArrowDownUp
+                v-else
+                class="size-3 text-muted-foreground"
+              />
             </button>
           </TableHead>
-          <TableHead class="text-right">
+
+          <TableHead
+            class="text-right"
+            :aria-sort="ariaSort('openUseActions')"
+          >
             <button
-              class="ml-auto flex items-center gap-1 font-medium"
+              type="button"
+              class="ml-auto flex items-center gap-1 rounded-md font-medium focus-visible:outline-2 focus-visible:outline-primary"
               @click="toggleSort('openUseActions')"
             >
-              Use-actions <ArrowDownUp class="size-3 text-muted-foreground" />
+              Use actions
+              <ArrowUp
+                v-if="sortKey === 'openUseActions' && sortAsc"
+                class="size-3 text-primary"
+              />
+              <ArrowDown
+                v-else-if="sortKey === 'openUseActions'"
+                class="size-3 text-primary"
+              />
+              <ArrowDownUp
+                v-else
+                class="size-3 text-muted-foreground"
+              />
             </button>
           </TableHead>
+
           <TableHead class="w-8" />
         </TableRow>
       </TableHeader>
+
       <TableBody>
         <TableRow
           v-for="row in rows"
           :key="row.agent.id"
-          class="group cursor-pointer"
-          @click="$router.push(`/agents/${row.agent.id}`)"
+          class="group h-12 cursor-pointer"
         >
-          <TableCell>
-            <div class="flex items-center gap-3">
-              <Avatar class="size-9 rounded-lg">
-                <AvatarFallback class="rounded-lg bg-primary/10 text-xs font-semibold text-primary">
+          <TableCell class="p-0">
+            <NuxtLink
+              :to="`/agents/${row.agent.id}`"
+              :class="cn(
+                'flex h-12 items-center gap-3 px-4 focus-visible:outline-2 focus-visible:outline-primary -outline-offset-2'
+              )"
+            >
+              <Avatar class="size-9 shrink-0 rounded-full">
+                <AvatarFallback class="rounded-full bg-primary/10 text-[12px] font-semibold text-primary">
                   {{ initials(row.agent.name) }}
                 </AvatarFallback>
               </Avatar>
               <div class="min-w-0">
-                <div class="truncate font-medium">
+                <div class="truncate text-sm font-semibold">
                   {{ row.agent.name }}
                 </div>
-                <div class="truncate text-xs text-muted-foreground">
+                <div
+                  class="truncate text-[12px] text-muted-foreground"
+                  :title="row.agent.goal"
+                >
                   {{ row.agent.goal }}
                 </div>
               </div>
-            </div>
+            </NuxtLink>
           </TableCell>
+
           <TableCell>
             <Badge
               variant="secondary"
-              :class="cn('border-transparent font-medium', healthTone(row.avgScore).cls)"
+              :class="cn(
+                'rounded-full border-transparent text-[12px] font-medium',
+                row.callsAnalyzed ? scoreToneSet(row.avgScore).badge : 'bg-muted text-muted-foreground'
+              )"
             >
-              {{ healthTone(row.avgScore).label }}
+              {{ row.callsAnalyzed ? scoreBandLabel(row.avgScore) : 'No data' }}
             </Badge>
           </TableCell>
+
           <TableCell>
             <div class="flex items-center gap-2">
-              <Progress
-                :model-value="row.avgScore"
-                class="h-1.5"
-                :class="row.callsAnalyzed ? '' : 'opacity-40'"
-              />
-              <span class="w-9 shrink-0 text-right text-sm font-medium tabular-nums">
+              <div
+                class="h-1.5 w-full overflow-hidden rounded-full"
+                :class="row.callsAnalyzed ? scoreToneSet(row.avgScore).bg : 'bg-muted'"
+                role="progressbar"
+                :aria-valuenow="row.callsAnalyzed ? Math.round(row.avgScore) : 0"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                :aria-label="`Average score for ${row.agent.name}`"
+              >
+                <div
+                  v-if="row.callsAnalyzed"
+                  class="h-full rounded-full"
+                  :class="scoreToneSet(row.avgScore).dot"
+                  :style="`width: ${Math.max(2, Math.round(row.avgScore))}%`"
+                />
+              </div>
+              <span
+                class="w-9 shrink-0 text-right text-sm font-semibold tabular-nums"
+                :class="row.callsAnalyzed ? scoreToneSet(row.avgScore).text : 'text-muted-foreground'"
+              >
                 {{ row.callsAnalyzed ? Math.round(row.avgScore) : '—' }}
               </span>
             </div>
           </TableCell>
+
           <TableCell class="text-right tabular-nums">
-            <span :class="row.failureRate > 0 ? 'font-medium text-red-600 dark:text-red-400' : 'text-muted-foreground'">
+            <span :class="cn('text-sm', row.failureRate > 0 ? cn('font-medium', failureClass(row.failureRate)) : 'text-muted-foreground')">
               {{ Math.round(row.failureRate * 100) }}%
             </span>
           </TableCell>
+
           <TableCell class="text-right tabular-nums">
             <span
               v-if="row.openUseActions"
-              class="inline-flex min-w-6 items-center justify-center rounded-full bg-amber-100 px-1.5 text-xs font-semibold text-amber-700 dark:bg-amber-950/60 dark:text-amber-300"
+              :class="cn('inline-flex min-w-6 items-center justify-center rounded-full px-1.5 text-[12px] font-semibold', toneClasses('warning').badge)"
             >
               {{ row.openUseActions }}
             </span>
             <span
               v-else
-              class="text-muted-foreground"
+              class="text-sm text-muted-foreground"
             >0</span>
           </TableCell>
+
           <TableCell>
-            <ChevronRight class="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+            <ChevronRight class="size-4 text-muted-foreground transition-transform duration-[var(--dur)] ease-[var(--ease)] motion-safe:group-hover:translate-x-0.5" />
+          </TableCell>
+        </TableRow>
+
+        <TableRow v-if="!rows.length">
+          <TableCell
+            :colspan="6"
+            class="h-32 text-center text-sm text-muted-foreground"
+          >
+            No agents to show yet.
           </TableCell>
         </TableRow>
       </TableBody>

@@ -2,43 +2,84 @@
 import type { Component } from 'vue'
 import { computed } from 'vue'
 import { VisArea, VisSingleContainer } from '@unovis/vue'
-import { Card, CardContent } from '~/components/ui/card'
+import SectionCard from '~/components/SectionCard.vue'
+import { useTone, type Tone } from '~/composables/useTone'
 import { cn } from '~/lib/utils'
 
+/**
+ * KpiCard — standardized KPI anatomy (W13). Every KPI shares one structure:
+ *   label (12/500) · metric (30/600 tabular) · delta line (always reserved,
+ *   so baselines align) · neutral icon chip · optional sparkline.
+ *
+ * Color discipline: the icon chip is neutral by default; accent/status tint
+ * is applied ONLY when the metric is in a warning/critical band (via `tone`),
+ * routed through useTone — never raw emerald-/amber-/red-NNN utilities.
+ */
 const props = withDefaults(defineProps<{
   label: string
   value: string | number
   icon: Component
-  /** Signed delta string e.g. "+2.4%" or "-3". */
+  /** Signed delta / status string e.g. "+2.4%" or "Within target". */
   delta?: string
-  /** Direction tinting for the delta + accent. */
-  trend?: 'up' | 'down' | 'neutral'
-  /** Higher-is-worse metrics (failure rate) invert the good/bad coloring. */
-  invert?: boolean
-  /** Optional sparkline series (y-values). */
+  /**
+   * Band tone for the metric. 'neutral' keeps the chip + metric neutral;
+   * 'warning' / 'danger' tint the metric + chip; 'success' tints the metric.
+   */
+  tone?: Tone
+  /** Optional sparkline series (y-values). Shown when ≥ 2 points. */
   spark?: number[]
-  accent?: string
+  /** Skeleton state matching the loaded layout. */
+  loading?: boolean
 }>(), {
-  trend: 'neutral',
-  invert: false,
-  accent: 'text-primary'
+  tone: 'neutral'
 })
+
+const { toneClasses } = useTone()
 
 const sparkData = computed(() => (props.spark ?? []).map((y, x) => ({ x, y })))
 
-const deltaTone = computed(() => {
-  if (props.trend === 'neutral') return 'text-muted-foreground'
-  const good = props.invert ? props.trend === 'down' : props.trend === 'up'
-  return good ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'
-})
+const toneSet = computed(() => toneClasses(props.tone))
+
+/** Metric tint: only color it when out of band (warning/danger); else neutral foreground. */
+const metricClass = computed(() =>
+  props.tone === 'warning' || props.tone === 'danger' ? toneSet.value.text : 'text-foreground'
+)
+
+/** Icon chip: neutral by default, status-tinted only when out of band. */
+const chipClass = computed(() =>
+  props.tone === 'warning' || props.tone === 'danger'
+    ? cn(toneSet.value.bg, toneSet.value.text)
+    : 'bg-muted text-muted-foreground'
+)
+
+/** Delta tint follows the band; neutral when within target. */
+const deltaClass = computed(() =>
+  props.tone === 'neutral' ? 'text-muted-foreground' : toneSet.value.text
+)
 </script>
 
 <template>
-  <Card class="relative overflow-hidden gap-0 py-0">
-    <CardContent class="flex flex-col gap-3 p-5">
+  <SectionCard padding="roomy">
+    <div
+      v-if="loading"
+      class="flex flex-col gap-3"
+      aria-hidden="true"
+    >
       <div class="flex items-center justify-between">
-        <span class="text-sm font-medium text-muted-foreground">{{ label }}</span>
-        <span :class="cn('flex size-8 items-center justify-center rounded-lg bg-muted', accent)">
+        <div class="h-4 w-24 animate-pulse rounded-md bg-muted" />
+        <div class="size-8 animate-pulse rounded-md bg-muted" />
+      </div>
+      <div class="h-8 w-20 animate-pulse rounded-md bg-muted" />
+      <div class="h-4 w-16 animate-pulse rounded-md bg-muted" />
+    </div>
+
+    <div
+      v-else
+      class="flex flex-col gap-3"
+    >
+      <div class="flex items-center justify-between gap-2">
+        <span class="text-[12px] font-medium text-muted-foreground">{{ label }}</span>
+        <span :class="cn('flex size-8 items-center justify-center rounded-md', chipClass)">
           <component
             :is="icon"
             class="size-4"
@@ -46,34 +87,33 @@ const deltaTone = computed(() => {
         </span>
       </div>
 
-      <div class="flex items-end justify-between gap-2">
-        <div class="flex flex-col gap-1">
-          <span class="text-3xl font-semibold tracking-tight tabular-nums">{{ value }}</span>
-          <span
-            v-if="delta"
-            :class="cn('text-xs font-medium tabular-nums', deltaTone)"
-          >
-            {{ delta }}
-          </span>
-        </div>
+      <div class="flex items-end justify-between gap-3">
+        <span :class="cn('text-[30px] font-semibold leading-none tracking-tight tabular-nums', metricClass)">
+          {{ value }}
+        </span>
 
         <div
           v-if="sparkData.length > 1"
-          class="h-10 w-24 shrink-0 self-end opacity-80"
+          class="h-9 w-24 shrink-0 self-end text-primary/70"
         >
           <VisSingleContainer
             :data="sparkData"
-            :height="40"
+            :height="36"
           >
             <VisArea
               :x="(d: { x: number }) => d.x"
               :y="(d: { y: number }) => d.y"
               color="currentColor"
-              :opacity="0.18"
+              :opacity="0.2"
             />
           </VisSingleContainer>
         </div>
       </div>
-    </CardContent>
-  </Card>
+
+      <!-- Delta row is always reserved so all four KPIs align at the baseline. -->
+      <p :class="cn('min-h-4 text-[12px] font-medium tabular-nums', deltaClass)">
+        {{ delta ?? '' }}
+      </p>
+    </div>
+  </SectionCard>
 </template>

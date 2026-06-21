@@ -1,30 +1,52 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { ArrowLeft, ChevronRight, CircleCheck, Target } from 'lucide-vue-next'
-import { Card, CardContent, CardHeader, CardTitle } from '~/components/ui/card'
-import { Badge } from '~/components/ui/badge'
-import { Avatar, AvatarFallback } from '~/components/ui/avatar'
-import { Skeleton } from '~/components/ui/skeleton'
+import { computed, watchEffect } from 'vue'
+import { ArrowUpRight, CircleCheck, Lightbulb, Target, Users } from 'lucide-vue-next'
 import { VisDonut, VisSingleContainer } from '@unovis/vue'
-import SeverityBadge from '~/components/SeverityBadge.vue'
+import { Avatar, AvatarFallback } from '~/components/ui/avatar'
+import { Badge } from '~/components/ui/badge'
+import { Button } from '~/components/ui/button'
+import { Alert, AlertDescription, AlertTitle } from '~/components/ui/alert'
+import { Skeleton } from '~/components/ui/skeleton'
+import SectionCard from '~/components/SectionCard.vue'
+import CallTable from '~/components/CallTable.vue'
 import RecommendationCard from '~/components/RecommendationCard.vue'
 import FlowDiagram from '~/components/FlowDiagram.vue'
+import { useApi } from '~/composables/useApi'
+import { useTone } from '~/composables/useTone'
+import { useBreadcrumb } from '~/composables/useBreadcrumb'
+import { cn } from '~/lib/utils'
 
 const route = useRoute()
 const id = computed(() => route.params.id as string)
 const { getAgent, getAgentFlow } = useApi()
+const { scoreToneName, toneClasses } = useTone()
+const { setBreadcrumb } = useBreadcrumb()
 
-const { data, pending } = await useAsyncData(`agent-${id.value}`, () => getAgent(id.value))
-const { data: flow } = await useAsyncData(`agent-flow-${id.value}`, () => getAgentFlow(id.value))
+const { data, pending, error, refresh } = await useAsyncData(`agent-${id.value}`, () => getAgent(id.value))
+// Flow is generated lazily and may fail independently; don't let it block the page.
+const { data: flow } = await useAsyncData(`agent-flow-${id.value}`, () => getAgentFlow(id.value), {
+  default: () => null
+})
 
 const agent = computed(() => data.value?.health.agent)
 const health = computed(() => data.value?.health)
 const flowSummary = computed(() => data.value?.flowSummary)
+const recommendations = computed(() => data.value?.recommendations ?? [])
+
+useHead(() => ({ title: `${agent.value?.name ?? 'Agent'} · Voice AI Copilot` }))
+
+watchEffect(() => {
+  setBreadcrumb([
+    { label: 'Agents', to: '/agents' },
+    { label: agent.value?.name ?? 'Agent' }
+  ])
+})
 
 function initials(name: string): string {
   return name.split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase()
 }
 
+/** Calls below the bar or carrying a finding — the agent's triage queue. */
 const failingCalls = computed(() =>
   (data.value?.calls ?? [])
     .filter(c => c.topSeverity || (c.score !== null && c.score < 70))
@@ -32,52 +54,88 @@ const failingCalls = computed(() =>
 )
 const allCalls = computed(() => data.value?.calls ?? [])
 
-const criteriaMet = computed(() => Math.round((health.value?.avgScore ?? 0)))
-const donutData = computed(() => [criteriaMet.value, 100 - criteriaMet.value])
+/* Headline avg-score donut: filled arc = accent, remainder = neutral track. */
+const criteriaMet = computed(() => Math.round(health.value?.avgScore ?? 0))
+const donutData = computed(() => [criteriaMet.value, Math.max(0, 100 - criteriaMet.value)])
 
-function fmtDate(iso?: string): string {
-  if (!iso) return '—'
-  const d = new Date(iso)
-  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+const failureTone = computed(() =>
+  (health.value?.failureRate ?? 0) > 0 ? toneClasses('danger').text : 'text-foreground'
+)
+
+/** Drift bar: skips read as warning, reordering/drift as danger — via tokens. */
+function driftRate(n: { skipRate: number, driftRate: number }): number {
+  return n.skipRate > 0 ? n.skipRate : n.driftRate
+}
+function driftToneSet(n: { skipRate: number, driftRate: number }) {
+  return n.skipRate > 0 ? toneClasses('warning') : toneClasses('danger')
+}
+function conformanceTone(score: number): string {
+  return toneClasses(scoreToneName(score)).text
 }
 </script>
 
 <template>
-  <div class="mx-auto flex w-full max-w-7xl flex-col gap-6 p-4 md:p-6">
-    <NuxtLink
-      to="/"
-      class="flex w-fit items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
+  <div class="mx-auto flex w-full max-w-[1400px] flex-col gap-6 p-4 md:p-6">
+    <!-- Error (transport / server) — distinct from a true not-found. -->
+    <Alert
+      v-if="error"
+      variant="destructive"
     >
-      <ArrowLeft class="size-4" /> Back to overview
-    </NuxtLink>
+      <AlertTitle>Couldn't load this agent</AlertTitle>
+      <AlertDescription>
+        <p>{{ error.statusMessage || error.message || 'The request failed before it reached the server.' }}</p>
+        <Button
+          variant="outline"
+          size="sm"
+          class="mt-2 w-fit"
+          @click="() => refresh()"
+        >
+          Try again
+        </Button>
+      </AlertDescription>
+    </Alert>
 
-    <template v-if="pending">
-      <Skeleton class="h-[140px] rounded-xl" />
+    <!-- Loading -->
+    <template v-else-if="pending">
+      <Skeleton class="h-[120px] rounded-xl" />
       <div class="grid gap-6 lg:grid-cols-3">
-        <Skeleton class="h-[300px] rounded-xl lg:col-span-2" />
-        <Skeleton class="h-[300px] rounded-xl" />
+        <Skeleton class="h-[420px] rounded-xl lg:col-span-2" />
+        <Skeleton class="h-[420px] rounded-xl" />
       </div>
     </template>
 
+    <!-- Loaded -->
     <template v-else-if="agent && health">
       <!-- Agent header -->
-      <Card class="gap-0 py-0">
-        <CardContent class="flex flex-col gap-5 p-5">
-          <div class="flex flex-wrap items-start gap-4">
-            <Avatar class="size-12 rounded-xl">
-              <AvatarFallback class="rounded-xl bg-primary/10 text-sm font-semibold text-primary">
-                {{ initials(agent.name) }}
-              </AvatarFallback>
-            </Avatar>
-            <div class="flex min-w-0 flex-1 flex-col gap-1">
-              <h1 class="text-xl font-semibold tracking-tight">
-                {{ agent.name }}
-              </h1>
-              <p class="flex items-start gap-1.5 text-sm text-muted-foreground">
-                <Target class="mt-0.5 size-4 shrink-0" />
-                {{ agent.goal }}
-              </p>
+      <SectionCard padding="roomy">
+        <div class="flex flex-col gap-5">
+          <div class="flex flex-wrap items-start justify-between gap-4">
+            <div class="flex min-w-0 items-start gap-4">
+              <Avatar class="size-12 shrink-0 rounded-full">
+                <AvatarFallback class="rounded-full bg-primary/10 text-sm font-semibold text-primary">
+                  {{ initials(agent.name) }}
+                </AvatarFallback>
+              </Avatar>
+              <div class="flex min-w-0 flex-col gap-1">
+                <h1 class="text-2xl font-semibold leading-tight tracking-tight">
+                  {{ agent.name }}
+                </h1>
+                <p class="flex items-start gap-1.5 text-sm text-muted-foreground">
+                  <Target class="mt-0.5 size-4 shrink-0" />
+                  {{ agent.goal }}
+                </p>
+              </div>
             </div>
+            <Button
+              as-child
+              variant="outline"
+              size="sm"
+            >
+              <NuxtLink :to="`/calls?agentId=${agent.id}`">
+                View all calls
+                <ArrowUpRight class="size-4" />
+              </NuxtLink>
+            </Button>
           </div>
 
           <div
@@ -88,184 +146,158 @@ function fmtDate(iso?: string): string {
               v-for="c in agent.successCriteria"
               :key="c.id"
               variant="outline"
-              class="gap-1.5 font-medium"
+              class="gap-1.5 rounded-md font-medium"
             >
-              <CircleCheck class="size-3 text-emerald-500" />
+              <CircleCheck :class="cn('size-3', toneClasses('success').text)" />
               {{ c.label }}
             </Badge>
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      </SectionCard>
 
       <div class="grid gap-6 lg:grid-cols-3">
-        <!-- Left column: stats + failing calls -->
-        <div class="flex flex-col gap-6 lg:col-span-2">
+        <!-- Wide column: stats + drift + expected flow + failing calls -->
+        <div class="flex min-w-0 flex-col gap-6 lg:col-span-2">
           <!-- Stat strip -->
-          <Card class="gap-0 py-0">
-            <CardContent class="grid grid-cols-2 gap-4 p-5 sm:grid-cols-4">
+          <SectionCard padding="roomy">
+            <div class="grid grid-cols-2 gap-4 sm:grid-cols-4">
               <div class="flex flex-col gap-1">
-                <span class="text-xs text-muted-foreground">Avg score</span>
-                <span class="text-2xl font-semibold tabular-nums">{{ Math.round(health.avgScore) }}</span>
+                <span class="text-[12px] font-medium text-muted-foreground">Avg score</span>
+                <span :class="cn('text-2xl font-semibold tabular-nums', toneClasses(scoreToneName(health.callsAnalyzed ? health.avgScore : null)).text)">
+                  {{ health.callsAnalyzed ? Math.round(health.avgScore) : '—' }}
+                </span>
               </div>
               <div class="flex flex-col gap-1">
-                <span class="text-xs text-muted-foreground">Calls analyzed</span>
+                <span class="text-[12px] font-medium text-muted-foreground">Calls analyzed</span>
                 <span class="text-2xl font-semibold tabular-nums">{{ health.callsAnalyzed }}</span>
               </div>
               <div class="flex flex-col gap-1">
-                <span class="text-xs text-muted-foreground">Failure rate</span>
-                <span
-                  class="text-2xl font-semibold tabular-nums"
-                  :class="health.failureRate > 0 ? 'text-red-600 dark:text-red-400' : ''"
-                >
+                <span class="text-[12px] font-medium text-muted-foreground">Failure rate</span>
+                <span :class="cn('text-2xl font-semibold tabular-nums', failureTone)">
                   {{ Math.round(health.failureRate * 100) }}%
                 </span>
               </div>
               <div class="flex flex-col gap-1">
-                <span class="text-xs text-muted-foreground">Open use-actions</span>
+                <span class="text-[12px] font-medium text-muted-foreground">Open use actions</span>
                 <span class="text-2xl font-semibold tabular-nums">{{ health.openUseActions }}</span>
               </div>
-            </CardContent>
-          </Card>
+            </div>
+          </SectionCard>
 
-          <!-- Flow drift across calls (the validation flywheel) -->
-          <Card
+          <!-- Flow drift across calls -->
+          <SectionCard
             v-if="flowSummary && flowSummary.callsScored > 0"
-            class="gap-0 py-0"
+            title="Flow drift across calls"
+            :description="`Where this agent most often departs from its expected flow (${flowSummary.callsScored} call${flowSummary.callsScored === 1 ? '' : 's'})`"
+            padding="roomy"
           >
-            <CardHeader class="flex-row items-center justify-between border-b py-4">
-              <div>
-                <CardTitle class="text-base">
-                  Flow drift across calls
-                </CardTitle>
-                <p class="text-xs text-muted-foreground">
-                  Where this agent most often departs from its designed flow ({{ flowSummary.callsScored }} calls)
-                </p>
-              </div>
-              <div
-                v-if="flowSummary.avgConformance !== null"
-                class="text-right"
-              >
-                <div class="text-[11px] text-muted-foreground">
-                  Avg conformance
+            <template
+              v-if="flowSummary.avgConformance !== null"
+              #actions
+            >
+              <div class="text-right">
+                <div class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                  Avg adherence
                 </div>
-                <div
-                  class="text-xl font-semibold tabular-nums"
-                  :class="flowSummary.avgConformance >= 80 ? 'text-emerald-600 dark:text-emerald-400' : flowSummary.avgConformance >= 60 ? 'text-amber-600 dark:text-amber-400' : 'text-red-600 dark:text-red-400'"
-                >
+                <div :class="cn('text-2xl font-semibold tabular-nums', conformanceTone(flowSummary.avgConformance))">
                   {{ flowSummary.avgConformance }}
                 </div>
               </div>
-            </CardHeader>
-            <CardContent class="flex flex-col gap-3 p-5">
+            </template>
+
+            <div
+              v-if="flowSummary.nodes.length"
+              class="flex flex-col gap-4"
+            >
               <div
                 v-for="n in flowSummary.nodes.slice(0, 5)"
                 :key="n.nodeId"
-                class="flex flex-col gap-1"
+                class="grid grid-cols-[1fr_auto] items-center gap-x-3 gap-y-1.5"
               >
-                <div class="flex items-center justify-between gap-2 text-sm">
-                  <span class="flex items-center gap-2 truncate">
-                    <Badge
-                      variant="outline"
-                      class="text-[10px] capitalize"
-                    >{{ n.kind }}</Badge>
-                    <span class="truncate font-medium">{{ n.label }}</span>
-                  </span>
-                  <span class="shrink-0 tabular-nums text-muted-foreground">
-                    {{ Math.round((n.skipRate > 0 ? n.skipRate : n.driftRate) * 100) }}% {{ n.skipRate > 0 ? 'skipped' : 'drifted' }}
-                  </span>
-                </div>
-                <div class="h-1.5 overflow-hidden rounded-full bg-muted">
+                <span class="flex min-w-0 items-center gap-2 text-sm">
+                  <Badge
+                    variant="outline"
+                    class="shrink-0 rounded-md text-[11px] capitalize"
+                  >{{ n.kind }}</Badge>
+                  <span class="truncate font-medium">{{ n.label }}</span>
+                </span>
+                <span class="shrink-0 text-right text-sm tabular-nums text-muted-foreground">
+                  {{ Math.round(driftRate(n) * 100) }}% {{ n.skipRate > 0 ? 'skipped' : 'drifted' }}
+                </span>
+                <div
+                  class="col-span-2 h-2 overflow-hidden rounded-full"
+                  :class="driftToneSet(n).bg"
+                  role="progressbar"
+                  :aria-valuenow="Math.round(driftRate(n) * 100)"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  :aria-label="`${n.label} drift`"
+                >
                   <div
                     class="h-full rounded-full"
-                    :class="n.skipRate > 0 ? 'bg-red-500' : 'bg-amber-500'"
-                    :style="{ width: `${Math.round((n.skipRate > 0 ? n.skipRate : n.driftRate) * 100)}%` }"
+                    :class="driftToneSet(n).dot"
+                    :style="{ width: `${Math.max(2, Math.round(driftRate(n) * 100))}%` }"
                   />
                 </div>
               </div>
-              <p
-                v-if="!flowSummary.nodes.length"
-                class="py-2 text-center text-sm text-muted-foreground"
-              >
-                No recurring drift — calls follow the designed flow.
-              </p>
-            </CardContent>
-          </Card>
+            </div>
+            <p
+              v-else
+              class="py-2 text-center text-sm text-muted-foreground"
+            >
+              No recurring drift — calls follow the expected flow.
+            </p>
+          </SectionCard>
 
-          <!-- Failing calls -->
-          <Card class="gap-0 py-0">
-            <CardHeader class="flex-row items-center justify-between border-b py-4">
-              <CardTitle class="text-base">
+          <!-- Expected call flow (moved to the wide column for room — W11) -->
+          <SectionCard
+            v-if="flow"
+            title="Expected call flow"
+            description="Design intent generated from the agent's goal and script."
+            padding="roomy"
+          >
+            <FlowDiagram
+              :flow="flow"
+              :interactive="false"
+            />
+          </SectionCard>
+
+          <!-- Calls needing attention -->
+          <div class="flex flex-col gap-3">
+            <div class="flex items-end justify-between gap-3">
+              <h2 class="text-[18px] font-semibold tracking-tight">
                 Calls needing attention
-              </CardTitle>
-              <span class="text-sm text-muted-foreground">{{ failingCalls.length }} of {{ allCalls.length }}</span>
-            </CardHeader>
-            <CardContent class="p-0">
-              <div
-                v-if="failingCalls.length"
-                class="divide-y"
-              >
-                <NuxtLink
-                  v-for="item in failingCalls"
-                  :key="item.call.id"
-                  :to="`/calls/${item.call.id}`"
-                  class="group flex items-center gap-3 px-5 py-3.5 transition-colors hover:bg-accent/40"
-                >
-                  <div class="flex min-w-0 flex-1 flex-col gap-0.5">
-                    <div class="flex items-center gap-2">
-                      <span class="truncate text-sm font-medium">{{ item.call.contactName || 'Unknown contact' }}</span>
-                      <Badge
-                        variant="outline"
-                        class="text-[10px] capitalize"
-                      >{{ item.call.direction }}</Badge>
-                    </div>
-                    <span class="truncate text-xs text-muted-foreground">
-                      {{ item.call.outcome || 'No outcome' }} · {{ fmtDate(item.call.startedAt) }} · {{ item.findingCount }} finding{{ item.findingCount === 1 ? '' : 's' }}
-                    </span>
-                  </div>
-                  <SeverityBadge :severity="item.topSeverity" />
-                  <span class="w-9 text-right text-sm font-semibold tabular-nums">
-                    {{ item.score === null ? '—' : Math.round(item.score) }}
-                  </span>
-                  <ChevronRight class="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
-                </NuxtLink>
-              </div>
-              <div
-                v-else
-                class="px-5 py-10 text-center text-sm text-muted-foreground"
-              >
-                No failing calls. This agent is performing within criteria.
-              </div>
-            </CardContent>
-          </Card>
+              </h2>
+              <span class="text-sm text-muted-foreground">
+                {{ failingCalls.length }} of {{ allCalls.length }}
+              </span>
+            </div>
+            <CallTable
+              :calls="failingCalls"
+              :show-agent="false"
+              :dense="true"
+              empty-title="No calls need attention"
+              empty-hint="Every analyzed call for this agent is within criteria."
+            />
+            <NuxtLink
+              v-if="allCalls.length"
+              :to="`/calls?agentId=${agent.id}`"
+              class="inline-flex w-fit items-center gap-1.5 rounded-md text-sm font-medium text-primary hover:underline focus-visible:outline-2 focus-visible:outline-primary"
+            >
+              View all calls for this agent
+              <ArrowUpRight class="size-4" />
+            </NuxtLink>
+          </div>
         </div>
 
-        <!-- Right column: expected flow + criteria donut + recommendations -->
-        <div class="flex flex-col gap-6">
-          <Card
-            v-if="flow"
-            class="gap-0 py-0"
+        <!-- Narrow column: adherence donut + recommendations -->
+        <div class="flex min-w-0 flex-col gap-6">
+          <SectionCard
+            title="Avg criteria met"
+            padding="roomy"
           >
-            <CardHeader class="border-b py-4">
-              <CardTitle class="text-base">
-                Expected call flow
-              </CardTitle>
-              <p class="text-xs text-muted-foreground">
-                Design intent generated from the agent's goal &amp; script
-              </p>
-            </CardHeader>
-            <CardContent class="p-4">
-              <FlowDiagram :flow="flow" />
-            </CardContent>
-          </Card>
-
-          <Card class="gap-0 py-0">
-            <CardHeader class="border-b py-4">
-              <CardTitle class="text-base">
-                Criteria met
-              </CardTitle>
-            </CardHeader>
-            <CardContent class="flex flex-col items-center gap-3 p-5">
-              <div class="relative h-[160px] w-[160px]">
+            <div class="flex flex-col items-center gap-4">
+              <div class="relative size-[160px]">
                 <VisSingleContainer
                   :data="donutData"
                   :height="160"
@@ -274,15 +306,18 @@ function fmtDate(iso?: string): string {
                     :value="(d: number) => d"
                     :arc-width="14"
                     :corner-radius="6"
-                    :color="['var(--primary)', 'var(--muted)']"
+                    :color="['var(--primary)', 'var(--chart-track, var(--muted))']"
                   />
                 </VisSingleContainer>
                 <div class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
                   <span class="text-3xl font-semibold tabular-nums">{{ criteriaMet }}%</span>
-                  <span class="text-xs text-muted-foreground">avg met</span>
+                  <span class="text-[12px] text-muted-foreground">avg met</span>
                 </div>
               </div>
-              <div class="w-full space-y-2.5">
+              <div
+                v-if="agent.successCriteria.length"
+                class="w-full space-y-2.5"
+              >
                 <div
                   v-for="c in agent.successCriteria"
                   :key="c.id"
@@ -291,49 +326,90 @@ function fmtDate(iso?: string): string {
                   <span class="truncate text-muted-foreground">{{ c.label }}</span>
                   <Badge
                     variant="outline"
-                    class="capitalize text-[10px]"
+                    class="rounded-md text-[11px] capitalize"
                   >
                     {{ c.kind }}
                   </Badge>
                 </div>
               </div>
-            </CardContent>
-          </Card>
+            </div>
+          </SectionCard>
 
           <div class="flex flex-col gap-3">
-            <h2 class="text-base font-semibold">
+            <h2 class="text-[18px] font-semibold tracking-tight">
               Recommendations
             </h2>
             <div
-              v-if="data?.recommendations.length"
+              v-if="recommendations.length"
               class="flex flex-col gap-3"
             >
               <RecommendationCard
-                v-for="rec in data.recommendations"
-                :key="rec.id"
-                :recommendation="rec"
+                v-for="rec in recommendations"
+                :key="rec.recommendation.id"
+                :item="rec"
               />
             </div>
-            <Card
+            <SectionCard
               v-else
               class="border-dashed"
             >
-              <CardContent class="py-8 text-center text-sm text-muted-foreground">
-                No recommendations for this agent yet.
-              </CardContent>
-            </Card>
+              <div class="flex flex-col items-center gap-3 py-8 text-center">
+                <div class="flex size-10 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                  <Lightbulb class="size-5" />
+                </div>
+                <div class="space-y-1">
+                  <p class="text-sm font-semibold">
+                    No recommendations yet
+                  </p>
+                  <p class="max-w-xs text-sm text-muted-foreground">
+                    Analyze more of this agent's calls to surface concrete fixes for its prompt, script, or coaching.
+                  </p>
+                </div>
+                <Button
+                  as-child
+                  variant="outline"
+                  size="sm"
+                >
+                  <NuxtLink :to="`/calls?agentId=${agent.id}`">
+                    View all calls
+                  </NuxtLink>
+                </Button>
+              </div>
+            </SectionCard>
           </div>
         </div>
       </div>
     </template>
 
-    <Card
+    <!-- Not found (data resolved, no entity) — centered block. -->
+    <div
       v-else
-      class="border-dashed"
+      class="flex justify-center"
     >
-      <CardContent class="py-16 text-center text-sm text-muted-foreground">
-        Agent not found.
-      </CardContent>
-    </Card>
+      <SectionCard class="w-full max-w-md border-dashed">
+        <div class="flex flex-col items-center gap-3 py-12 text-center">
+          <div class="flex size-12 items-center justify-center rounded-full bg-muted text-muted-foreground">
+            <Users class="size-6" />
+          </div>
+          <div class="space-y-1">
+            <p class="text-base font-semibold">
+              Agent not found
+            </p>
+            <p class="max-w-xs text-sm text-muted-foreground">
+              This agent may have been removed, or the link is out of date.
+            </p>
+          </div>
+          <Button
+            as-child
+            variant="outline"
+            size="sm"
+          >
+            <NuxtLink to="/agents">
+              Back to agents
+            </NuxtLink>
+          </Button>
+        </div>
+      </SectionCard>
+    </div>
   </div>
 </template>

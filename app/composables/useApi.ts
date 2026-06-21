@@ -6,8 +6,24 @@ import type {
   CallListItem,
   ExpectedFlow,
   FleetStats,
-  Recommendation
+  RecommendationItem
 } from '#shared/types'
+
+/** Resolved GHL/runtime context for the Settings screen (GET /api/context). */
+export interface AppContext {
+  locationId?: string
+  userId?: string
+  email?: string
+  userName?: string
+  role?: string
+  type?: string
+}
+
+/** Result of POSTing /api/sync (poll + ingest GHL call logs). */
+export interface SyncResult {
+  ingested: number
+  errors?: string[]
+}
 
 /** Aggregate flow-drift across an agent's analyzed calls. */
 export interface FlowDriftSummary {
@@ -20,7 +36,7 @@ export interface FlowDriftSummary {
 export interface AgentDetail {
   health: AgentHealth
   calls: CallListItem[]
-  recommendations: Recommendation[]
+  recommendations: RecommendationItem[]
   flowSummary: FlowDriftSummary
 }
 
@@ -32,6 +48,14 @@ export function useApi() {
 
     /** Single agent health + calls + recommendations. */
     getAgent: (id: string) => $fetch<AgentDetail>(`/api/agents/${id}`),
+
+    /**
+     * Fleet-wide recommendations fix-queue, ranked by impact then recency. Each
+     * item carries its source call/agent so the list can deep-link to origin.
+     * Optional `agentId` scopes the queue to one agent.
+     */
+    getRecommendations: (query?: { agentId?: string }) =>
+      $fetch<RecommendationItem[]>('/api/recommendations', { query }),
 
     /** Filterable call list. */
     getCalls: (query?: { agentId?: string, severity?: string, outcome?: string }) =>
@@ -52,7 +76,19 @@ export function useApi() {
       $fetch<{ agent: Agent, flow: ExpectedFlow }>('/api/agents', { method: 'POST', body }),
 
     /** Load the demo dataset. */
-    seed: () => $fetch<{ agents: number, calls: number }>('/api/seed', { method: 'POST' })
+    seed: () => $fetch<{ agents: number, calls: number }>('/api/seed', { method: 'POST' }),
+
+    /**
+     * Poll GHL Voice AI call-logs and ingest new calls/transcripts (Settings →
+     * "Sync calls from HighLevel"). Degrades gracefully: returns a structured
+     * { ingested, errors } instead of throwing when no PIT/location is configured.
+     */
+    syncCalls: (body?: { locationId?: string }) =>
+      $fetch<SyncResult>('/api/sync', { method: 'POST', body: body ?? {} }),
+
+    /** Resolve the GHL/runtime context (location + user) for the Settings screen. */
+    getContext: (query?: { encryptedData?: string, locationId?: string }) =>
+      $fetch<AppContext>('/api/context', { query })
   }
 }
 

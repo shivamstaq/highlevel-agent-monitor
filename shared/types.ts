@@ -259,6 +259,23 @@ export const RecommendationSchema = z.object({
 })
 export type Recommendation = z.infer<typeof RecommendationSchema>
 
+/**
+ * A recommendation tagged with its source call/agent so the fix-queue and the
+ * Overview / agent feeds can deep-link back to the call (or agent) that raised
+ * it. The deduped fleet/agent views collapse the same advice across many calls;
+ * the carried source points at the strongest (highest-impact, most-recent) call.
+ */
+export const RecommendationItemSchema = z.object({
+  recommendation: RecommendationSchema,
+  callId: z.string(),
+  agentId: z.string(),
+  agentName: z.string(),
+  contactName: z.string().optional(),
+  callScore: z.number().min(0).max(100).optional(),
+  callStartedAt: z.string().optional()
+})
+export type RecommendationItem = z.infer<typeof RecommendationItemSchema>
+
 /** "Use Action" — a call segment that needs human intervention or script training. */
 export const UseActionSchema = z.object({
   id: z.string(),
@@ -319,7 +336,7 @@ export const FleetStatsSchema = z.object({
   /** Average score per day for the trend chart. */
   trend: z.array(z.object({ date: z.string(), score: z.number() })),
   agents: z.array(AgentHealthSchema),
-  topRecommendations: z.array(RecommendationSchema)
+  topRecommendations: z.array(RecommendationItemSchema)
 })
 export type FleetStats = z.infer<typeof FleetStatsSchema>
 

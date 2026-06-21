@@ -15,6 +15,7 @@ import type {
   CallListItem,
   FleetStats,
   Recommendation,
+  RecommendationItem,
   Severity
 } from '#shared/types'
 
@@ -104,13 +105,41 @@ export function computeAgentHealth(
 }
 
 /**
- * Pick the highest-impact, deduped recommendations across a set of analyses.
- * Dedup key is target + normalized title so the same advice surfaced on many
- * calls collapses to one fleet-level recommendation. Sorted high impact first,
- * then by how many calls raised it. Capped at `limit`.
+ * Lookups the recommendation rollup needs to attach a source to each item.
+ * Both are optional: a missing agent/call just yields a thinner source (the
+ * advice still deep-links by id). `agentsById` resolves the agent name;
+ * `callsById` resolves the source call's contact name + start time, and the
+ * per-call score comes from each analysis' own scorecard.
  */
-export function topRecommendations(analyses: Analysis[], limit = 6): Recommendation[] {
-  const byKey = new Map<string, { rec: Recommendation, count: number, findingIds: Set<string> }>()
+export interface RecommendationSources {
+  agentsById?: Map<string, Agent>
+  callsById?: Map<string, Call>
+}
+
+/**
+ * Pick the highest-impact, deduped recommendations across a set of analyses,
+ * each tagged with the source call/agent that best represents it so the UI can
+ * deep-link back (W09). Dedup key is target + normalized title so the same
+ * advice surfaced on many calls collapses to one item. For a deduped item the
+ * carried source is the strongest contributing call: highest call score's
+ * inverse is irrelevant — we pick by recommendation impact, then most recent
+ * call. Sorted high impact first, then by how many calls raised it. Capped at
+ * `limit` (pass `Infinity` for the full fix-queue).
+ */
+export function topRecommendations(
+  analyses: Analysis[],
+  limit = 6,
+  sources: RecommendationSources = {}
+): RecommendationItem[] {
+  interface Bucket {
+    rec: Recommendation
+    count: number
+    findingIds: Set<string>
+    /** The analysis whose call best represents this advice (source for deep-link). */
+    sourceAnalysis: Analysis
+    sourceImpact: Severity
+  }
+  const byKey = new Map<string, Bucket>()
 
   for (const analysis of analyses) {
     for (const rec of analysis.recommendations) {
@@ -123,8 +152,23 @@ export function topRecommendations(analyses: Analysis[], limit = 6): Recommendat
         if (SEVERITY_RANK[rec.impact] > SEVERITY_RANK[existing.rec.impact]) {
           existing.rec = { ...existing.rec, impact: rec.impact }
         }
+        // Promote the source to the strongest call: higher rec impact wins,
+        // ties break to the more recent call so the link points at fresh evidence.
+        const better = SEVERITY_RANK[rec.impact] > SEVERITY_RANK[existing.sourceImpact]
+          || (SEVERITY_RANK[rec.impact] === SEVERITY_RANK[existing.sourceImpact]
+            && analysisCallTime(analysis) > analysisCallTime(existing.sourceAnalysis, sources))
+        if (better) {
+          existing.sourceAnalysis = analysis
+          existing.sourceImpact = rec.impact
+        }
       } else {
-        byKey.set(key, { rec, count: 1, findingIds: new Set(rec.findingIds) })
+        byKey.set(key, {
+          rec,
+          count: 1,
+          findingIds: new Set(rec.findingIds),
+          sourceAnalysis: analysis,
+          sourceImpact: rec.impact
+        })
       }
     }
   }
@@ -136,7 +180,33 @@ export function topRecommendations(analyses: Analysis[], limit = 6): Recommendat
       return b.count - a.count
     })
     .slice(0, limit)
-    .map(({ rec, findingIds }) => ({ ...rec, findingIds: [...findingIds] }))
+    .map(({ rec, findingIds, sourceAnalysis }) =>
+      toRecommendationItem({ ...rec, findingIds: [...findingIds] }, sourceAnalysis, sources)
+    )
+}
+
+/** Resolve the source call's startedAt for tie-breaking (falls back to analysis.createdAt). */
+function analysisCallTime(analysis: Analysis, sources: RecommendationSources = {}): string {
+  return sources.callsById?.get(analysis.callId)?.startedAt ?? analysis.createdAt
+}
+
+/** Tag one recommendation with the call/agent that raised it for deep-linking. */
+function toRecommendationItem(
+  recommendation: Recommendation,
+  analysis: Analysis,
+  sources: RecommendationSources
+): RecommendationItem {
+  const agent = sources.agentsById?.get(analysis.agentId)
+  const call = sources.callsById?.get(analysis.callId)
+  return {
+    recommendation,
+    callId: analysis.callId,
+    agentId: analysis.agentId,
+    agentName: agent?.name ?? analysis.agentId,
+    ...(call?.contactName ? { contactName: call.contactName } : {}),
+    callScore: analysis.scorecard.overall,
+    ...(call?.startedAt ? { callStartedAt: call.startedAt } : {})
+  }
 }
 
 /**
@@ -163,6 +233,10 @@ export function computeFleetStats(
     computeAgentHealth(agent, callsByAgent.get(agent.id) ?? [], analysesByCallId)
   )
 
+  // Source lookups so top recommendations can deep-link to their origin (W09).
+  const agentsById = new Map(agents.map(a => [a.id, a]))
+  const callsById = new Map(calls.map(c => [c.id, c]))
+
   // Fleet-level metrics only consider analyses whose call actually exists in
   // storage, so an orphaned analysis (its call was deleted) can't skew the KPIs.
   // This matches the trend chart, which iterates over stored calls.
@@ -182,7 +256,7 @@ export function computeFleetStats(
     openUseActions,
     trend: buildTrend(calls, analysesByCallId),
     agents: agentHealths,
-    topRecommendations: topRecommendations(liveAnalyses)
+    topRecommendations: topRecommendations(liveAnalyses, 6, { agentsById, callsById })
   }
 }
 

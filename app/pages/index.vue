@@ -1,64 +1,90 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { Activity, ListChecks, PhoneCall, TrendingUp, Sparkles, PlusCircle } from 'lucide-vue-next'
-import { toast } from 'vue-sonner'
-import { Card, CardContent, CardHeader, CardTitle } from '~/components/ui/card'
-import { Button } from '~/components/ui/button'
-import { Skeleton } from '~/components/ui/skeleton'
+import { computed } from 'vue'
+import {
+  Activity,
+  AlertTriangle,
+  ArrowRight,
+  ListChecks,
+  PhoneCall,
+  PlusCircle,
+  Sparkles,
+  TrendingDown
+} from 'lucide-vue-next'
+import SectionCard from '~/components/SectionCard.vue'
 import KpiCard from '~/components/KpiCard.vue'
 import HealthChart from '~/components/HealthChart.vue'
 import AgentTable from '~/components/AgentTable.vue'
 import RecommendationCard from '~/components/RecommendationCard.vue'
+import { Button } from '~/components/ui/button'
+import { Alert, AlertDescription, AlertTitle } from '~/components/ui/alert'
+import { Skeleton } from '~/components/ui/skeleton'
+import { useApi } from '~/composables/useApi'
+import { useBreadcrumb } from '~/composables/useBreadcrumb'
+import { scoreToneName, type Tone } from '~/composables/useTone'
 
-const { getFleet, seed } = useApi()
+useHead({ title: 'Overview · Voice AI Copilot' })
 
-const { data: fleet, pending, refresh } = await useAsyncData('fleet', () => getFleet())
+// Overview is the root crumb; the layout renders "Overview" itself, so the
+// page-supplied trail stays empty.
+const { setBreadcrumb } = useBreadcrumb()
+setBreadcrumb([])
 
-const seeding = ref(false)
-async function loadDemo() {
-  seeding.value = true
-  try {
-    const res = await seed()
-    toast.success('Demo data loaded', { description: `${res.agents} agents, ${res.calls} calls ingested.` })
-    await refresh()
-  } catch {
-    toast.error('Could not load demo data')
-  } finally {
-    seeding.value = false
-  }
-}
+const { getFleet } = useApi()
+
+const { data: fleet, pending, error, refresh } = await useAsyncData('fleet', () => getFleet())
+
+/** Bounded previews so the two columns terminate near the same baseline (W17). */
+const AGENT_PREVIEW = 5
+const REC_PREVIEW = 4
 
 const sparkScores = computed(() => (fleet.value?.trend ?? []).map(t => t.score))
-const isEmpty = computed(() => !pending.value && (fleet.value?.agents?.length ?? 0) === 0)
+const isEmpty = computed(() => !pending.value && !error.value && (fleet.value?.agents?.length ?? 0) === 0)
+
+const agentCount = computed(() => fleet.value?.agents?.length ?? 0)
+const topAgents = computed(() => (fleet.value?.agents ?? []).slice(0, AGENT_PREVIEW))
+
+const recCount = computed(() => fleet.value?.topRecommendations?.length ?? 0)
+const topRecs = computed(() => (fleet.value?.topRecommendations ?? []).slice(0, REC_PREVIEW))
 
 function fmtPct(n: number | undefined): string {
   return `${Math.round((n ?? 0) * 100)}%`
 }
+
+/** Fleet-health band drives the one accent/status tint on the KPI row. */
+const healthTone = computed<Tone>(() => scoreToneName(fleet.value?.fleetHealth))
+const healthDelta = computed(() => {
+  const t = fleet.value?.trend ?? []
+  if (t.length < 2) return 'No trend yet'
+  const delta = Math.round((t.at(-1)!.score) - (t.at(-2)!.score))
+  if (delta === 0) return 'Flat vs. yesterday'
+  return `${delta > 0 ? '+' : ''}${delta} vs. yesterday`
+})
+
+/** Failure rate above 20% is a warning band; the KPI tints only then. */
+const failureTone = computed<Tone>(() => ((fleet.value?.failureRate ?? 0) > 0.2 ? 'warning' : 'neutral'))
+const failureDelta = computed(() =>
+  (fleet.value?.failureRate ?? 0) > 0.2 ? 'Above 20% target' : 'Within target'
+)
+
+const useActionTone = computed<Tone>(() => ((fleet.value?.openUseActions ?? 0) > 0 ? 'warning' : 'neutral'))
+const useActionDelta = computed(() =>
+  (fleet.value?.openUseActions ?? 0) > 0 ? 'Awaiting review' : 'All clear'
+)
 </script>
 
 <template>
-  <div class="mx-auto flex w-full max-w-7xl flex-col gap-6 p-4 md:p-6">
+  <div class="mx-auto flex w-full max-w-[1400px] flex-col gap-6 p-4 md:p-6">
     <!-- Page header -->
     <div class="flex flex-wrap items-end justify-between gap-3">
-      <div>
-        <h1 class="text-2xl font-semibold tracking-tight">
-          Fleet Overview
+      <div class="space-y-1">
+        <h1 class="text-[24px] font-semibold leading-tight tracking-tight">
+          Overview
         </h1>
         <p class="text-sm text-muted-foreground">
           Autonomous QA across every Voice AI agent in your location.
         </p>
       </div>
       <div class="flex items-center gap-2">
-        <Button
-          v-if="!isEmpty"
-          variant="outline"
-          size="sm"
-          :disabled="seeding"
-          @click="loadDemo"
-        >
-          <Sparkles class="size-4" />
-          {{ seeding ? 'Loading…' : 'Reload demo data' }}
-        </Button>
         <Button
           as-child
           size="sm"
@@ -70,132 +96,237 @@ function fmtPct(n: number | undefined): string {
       </div>
     </div>
 
+    <!-- Error -->
+    <Alert
+      v-if="error"
+      variant="destructive"
+    >
+      <AlertTriangle class="size-4" />
+      <AlertTitle>Couldn't load your fleet</AlertTitle>
+      <AlertDescription class="flex flex-col items-start gap-3">
+        <span>
+          The dashboard data didn't come back{{ error?.statusCode ? ` (error ${error.statusCode})` : '' }}.
+          This is usually a temporary connection issue.
+        </span>
+        <Button
+          variant="outline"
+          size="sm"
+          @click="refresh()"
+        >
+          Try again
+        </Button>
+      </AlertDescription>
+    </Alert>
+
     <!-- Loading -->
-    <template v-if="pending">
+    <template v-else-if="pending">
       <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Skeleton
+        <KpiCard
           v-for="i in 4"
           :key="i"
-          class="h-[120px] rounded-xl"
+          label=""
+          :value="0"
+          :icon="Activity"
+          loading
         />
       </div>
-      <Skeleton class="h-[320px] rounded-xl" />
-      <Skeleton class="h-[280px] rounded-xl" />
+      <Skeleton class="h-[244px] rounded-xl" />
+      <div class="grid gap-6 lg:grid-cols-5">
+        <Skeleton class="h-[360px] rounded-xl lg:col-span-3" />
+        <Skeleton class="h-[360px] rounded-xl lg:col-span-2" />
+      </div>
     </template>
 
-    <!-- Empty state -->
-    <Card
+    <!-- Empty state — invites loading demo data from Settings -->
+    <SectionCard
       v-else-if="isEmpty"
       class="border-dashed"
     >
-      <CardContent class="flex flex-col items-center justify-center gap-4 py-16 text-center">
-        <div class="flex size-14 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+      <div class="flex flex-col items-center justify-center gap-4 py-16 text-center">
+        <div class="flex size-14 items-center justify-center rounded-full bg-primary/10 text-primary">
           <Activity class="size-7" />
         </div>
         <div class="space-y-1">
-          <h2 class="text-lg font-semibold">
+          <h2 class="text-[18px] font-semibold leading-tight">
             No agents yet
           </h2>
-          <p class="mx-auto max-w-sm text-sm text-muted-foreground">
-            Load the demo dataset to see seeded Voice AI agents, call transcripts, and analysis findings in action.
+          <p class="mx-auto max-w-md text-sm text-muted-foreground">
+            Connect a HighLevel location or load the demo dataset to see seeded agents,
+            call transcripts, and analysis findings here.
           </p>
         </div>
-        <Button
-          :disabled="seeding"
-          @click="loadDemo"
-        >
-          <Sparkles class="size-4" />
-          {{ seeding ? 'Loading…' : 'Load demo data' }}
-        </Button>
-      </CardContent>
-    </Card>
+        <div class="flex flex-wrap items-center justify-center gap-2">
+          <Button as-child>
+            <NuxtLink to="/settings">
+              <Sparkles class="size-4" /> Load demo data
+            </NuxtLink>
+          </Button>
+          <Button
+            as-child
+            variant="outline"
+          >
+            <NuxtLink to="/agents/new">
+              <PlusCircle class="size-4" /> New agent
+            </NuxtLink>
+          </Button>
+        </div>
+      </div>
+    </SectionCard>
 
     <!-- Dashboard -->
     <template v-else-if="fleet">
+      <!-- 4 uniform KPI cards -->
       <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <KpiCard
-          label="Fleet Health"
+          label="Fleet health"
           :value="Math.round(fleet.fleetHealth)"
           :icon="Activity"
-          accent="text-emerald-600 dark:text-emerald-400"
+          :tone="healthTone"
           :spark="sparkScores"
-          trend="up"
+          :delta="healthDelta"
         />
         <KpiCard
-          label="Calls Analyzed"
+          label="Calls analyzed"
           :value="fleet.callsAnalyzed"
           :icon="PhoneCall"
-          accent="text-sky-600 dark:text-sky-400"
+          :delta="`Across ${agentCount} agent${agentCount === 1 ? '' : 's'}`"
         />
         <KpiCard
-          label="Failure Rate"
+          label="Failure rate"
           :value="fmtPct(fleet.failureRate)"
-          :icon="TrendingUp"
-          accent="text-red-600 dark:text-red-400"
-          invert
-          :trend="fleet.failureRate > 0.2 ? 'up' : 'down'"
-          :delta="fleet.failureRate > 0.2 ? 'Above target' : 'Within target'"
+          :icon="TrendingDown"
+          :tone="failureTone"
+          :delta="failureDelta"
         />
         <KpiCard
-          label="Open Use-Actions"
+          label="Open use actions"
           :value="fleet.openUseActions"
           :icon="ListChecks"
-          accent="text-amber-600 dark:text-amber-400"
+          :tone="useActionTone"
+          :delta="useActionDelta"
         />
       </div>
 
-      <Card class="gap-0 py-0">
-        <CardHeader class="flex-row items-center justify-between border-b py-4">
-          <div>
-            <CardTitle class="text-base">
-              Fleet health trend
-            </CardTitle>
-            <p class="text-sm text-muted-foreground">
-              Average call score per day
-            </p>
-          </div>
-        </CardHeader>
-        <CardContent class="p-4">
-          <HealthChart :trend="fleet.trend" />
-        </CardContent>
-      </Card>
+      <!-- Compact trend strip -->
+      <SectionCard
+        title="Fleet health trend"
+        description="Average call score per day"
+        padding="dense"
+      >
+        <HealthChart
+          :trend="fleet.trend"
+          :height="180"
+        />
+      </SectionCard>
 
-      <div class="grid gap-6 lg:grid-cols-5">
-        <div class="flex flex-col gap-3 lg:col-span-3">
-          <div class="flex items-center justify-between">
-            <h2 class="text-base font-semibold">
-              Agents
-            </h2>
-            <span class="text-sm text-muted-foreground">{{ fleet.agents.length }} monitored</span>
+      <!-- Two-column work area: agents preview + recommendations preview -->
+      <div class="grid items-start gap-6 lg:grid-cols-5">
+        <!-- Agents preview (top-N) -->
+        <section class="flex flex-col gap-3 lg:col-span-3">
+          <div class="flex items-center justify-between gap-3">
+            <div class="flex items-baseline gap-2">
+              <h2 class="text-[18px] font-semibold leading-tight tracking-tight">
+                Agents
+              </h2>
+              <span class="text-sm text-muted-foreground tabular-nums">
+                {{ agentCount }} monitored
+              </span>
+            </div>
+            <NuxtLink
+              to="/agents"
+              class="inline-flex items-center gap-1 rounded-md text-sm font-medium text-primary hover:underline focus-visible:outline-2 focus-visible:outline-primary"
+            >
+              View all
+              <ArrowRight class="size-3.5" />
+            </NuxtLink>
           </div>
-          <AgentTable :agents="fleet.agents" />
-        </div>
 
-        <div class="flex flex-col gap-3 lg:col-span-2">
-          <div class="flex items-center justify-between">
-            <h2 class="text-base font-semibold">
-              Top recommendations
-            </h2>
+          <AgentTable :agents="topAgents" />
+
+          <p
+            v-if="agentCount > AGENT_PREVIEW"
+            class="text-[12px] text-muted-foreground"
+          >
+            Showing top {{ AGENT_PREVIEW }} of {{ agentCount }} by score.
+            <NuxtLink
+              to="/agents"
+              class="font-medium text-primary hover:underline focus-visible:outline-2 focus-visible:outline-primary"
+            >
+              View all agents
+            </NuxtLink>
+          </p>
+        </section>
+
+        <!-- Recommendations preview (top-N, deep-linked) -->
+        <section class="flex flex-col gap-3 lg:col-span-2">
+          <div class="flex items-center justify-between gap-3">
+            <div class="flex items-baseline gap-2">
+              <h2 class="text-[18px] font-semibold leading-tight tracking-tight">
+                Top recommendations
+              </h2>
+              <span
+                v-if="recCount"
+                class="text-sm text-muted-foreground tabular-nums"
+              >
+                {{ recCount }} open
+              </span>
+            </div>
+            <NuxtLink
+              v-if="recCount"
+              to="/recommendations"
+              class="inline-flex items-center gap-1 rounded-md text-sm font-medium text-primary hover:underline focus-visible:outline-2 focus-visible:outline-primary"
+            >
+              View all
+              <ArrowRight class="size-3.5" />
+            </NuxtLink>
           </div>
+
           <div
-            v-if="fleet.topRecommendations.length"
+            v-if="topRecs.length"
             class="flex flex-col gap-3"
           >
             <RecommendationCard
-              v-for="rec in fleet.topRecommendations"
-              :key="rec.id"
-              :recommendation="rec"
+              v-for="item in topRecs"
+              :key="item.recommendation.id"
+              :item="item"
+              compact
             />
+            <NuxtLink
+              v-if="recCount > REC_PREVIEW"
+              to="/recommendations"
+              class="inline-flex items-center gap-1 self-start rounded-md text-sm font-medium text-primary hover:underline focus-visible:outline-2 focus-visible:outline-primary"
+            >
+              See all {{ recCount }} recommendations
+              <ArrowRight class="size-3.5" />
+            </NuxtLink>
           </div>
-          <Card
-            v-else
-            class="border-dashed"
-          >
-            <CardContent class="py-10 text-center text-sm text-muted-foreground">
-              No recommendations yet. Analyze calls to surface improvements.
-            </CardContent>
-          </Card>
-        </div>
+
+          <SectionCard v-else>
+            <div class="flex flex-col items-center gap-3 py-8 text-center">
+              <div class="flex size-10 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                <ListChecks class="size-5" />
+              </div>
+              <div class="space-y-1">
+                <p class="text-sm font-semibold">
+                  No open recommendations
+                </p>
+                <p class="mx-auto max-w-xs text-sm text-muted-foreground">
+                  Every analyzed call is on track. Analyze more calls to surface
+                  prompt and script improvements here.
+                </p>
+              </div>
+              <Button
+                as-child
+                variant="outline"
+                size="sm"
+              >
+                <NuxtLink to="/calls">
+                  Go to calls
+                </NuxtLink>
+              </Button>
+            </div>
+          </SectionCard>
+        </section>
       </div>
     </template>
   </div>

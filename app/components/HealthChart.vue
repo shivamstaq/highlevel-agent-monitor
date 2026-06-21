@@ -4,14 +4,29 @@ import { VisArea, VisAxis, VisCrosshair, VisLine, VisTooltip, VisXYContainer } f
 
 interface Point { date: string, score: number }
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   trend: Point[]
-}>()
+  /** Plot height in px. Default tightened to ~180px (W25). */
+  height?: number
+}>(), {
+  height: 180
+})
 
 const data = computed(() => props.trend.map((p, i) => ({ ...p, i })))
 
 const x = (d: { i: number }) => d.i
 const y = (d: { score: number }) => d.score
+
+/**
+ * Padded auto y-domain: floor at (min - 10) clamped to >= 0, ceiling 100.
+ * A 55-65 series fills the plot instead of hugging a hard [0,100] floor.
+ */
+const yDomain = computed<[number, number]>(() => {
+  if (!data.value.length) return [0, 100]
+  const min = Math.min(...data.value.map(d => d.score))
+  const lo = Math.max(0, Math.floor(min - 10))
+  return [lo, 100]
+})
 
 function fmtDate(iso: string): string {
   const d = new Date(iso)
@@ -25,28 +40,31 @@ const tickFormat = (i: number) => {
 }
 
 const tooltipTemplate = (d: { date: string, score: number }) =>
-  `<div style="font-size:12px"><div style="color:var(--muted-foreground)">${fmtDate(d.date)}</div><div style="font-weight:600">${Math.round(d.score)} avg score</div></div>`
+  `<div style="font-size:12px;font-family:var(--font-sans)"><div style="color:var(--muted-foreground)">${fmtDate(d.date)}</div><div style="font-weight:600;font-variant-numeric:tabular-nums">${Math.round(d.score)} avg score</div></div>`
 </script>
 
 <template>
-  <div class="h-[260px] w-full">
+  <div
+    class="w-full [--vis-axis-grid-color:var(--chart-grid)] [--vis-axis-tick-label-color:var(--muted-foreground)]"
+    :style="{ height: `${height}px` }"
+  >
     <VisXYContainer
       v-if="data.length"
       :data="data"
-      :height="260"
+      :height="height"
       :margin="{ top: 12, right: 12, bottom: 28, left: 32 }"
-      :y-domain="[0, 100]"
+      :y-domain="yDomain"
     >
       <VisArea
         :x="x"
         :y="y"
-        color="var(--primary)"
-        :opacity="0.12"
+        color="var(--chart-1)"
+        :opacity="0.1"
       />
       <VisLine
         :x="x"
         :y="y"
-        color="var(--primary)"
+        color="var(--chart-1)"
         :line-width="2.5"
       />
       <VisAxis
@@ -65,7 +83,7 @@ const tooltipTemplate = (d: { date: string, score: number }) =>
       />
       <VisCrosshair
         :template="tooltipTemplate"
-        color="var(--primary)"
+        color="var(--chart-1)"
       />
       <VisTooltip />
     </VisXYContainer>
