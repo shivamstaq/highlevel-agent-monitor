@@ -1,0 +1,66 @@
+{
+  "project": "Voice AI Observability Copilot",
+  "frameworkNotes": "Nuxt 4 (srcDir=app/), Nitro server routes = backend, Vue 3 <script setup> = frontend. Design system = shadcn-vue (app/components/ui). Charts = @unovis/vue. Types = shared/types.ts (zod). Persistence = Nitro useStorage (unstorage fs driver, no native deps). LLM = pluggable provider (Ollama default, Anthropic optional, mock fallback).",
+  "contract": {
+    "typesModule": "shared/types.ts",
+    "importAlias": "#shared/types in server, ~/../shared/types or auto-imported in app where possible; use relative imports if alias unavailable",
+    "storageKeyspace": {
+      "agents": "agents:<agentId>",
+      "calls": "calls:<callId>",
+      "transcripts": "transcripts:<callId>",
+      "analyses": "analyses:<callId>"
+    }
+  },
+  "apiRoutes": [
+    { "method": "POST", "path": "/api/seed", "owner": "data", "desc": "Load seeded agents/calls/transcripts into storage. Returns counts.", "returns": "{ agents:number, calls:number }" },
+    { "method": "GET", "path": "/api/agents", "owner": "api", "desc": "Fleet stats + per-agent health rollup.", "returns": "FleetStats" },
+    { "method": "GET", "path": "/api/agents/:id", "owner": "api", "desc": "One agent with health + its calls + recommendations.", "returns": "{ health: AgentHealth, calls: CallListItem[], recommendations: Recommendation[] }" },
+    { "method": "GET", "path": "/api/calls", "owner": "api", "desc": "Filterable call list (query: agentId, severity, outcome).", "returns": "CallListItem[]" },
+    { "method": "GET", "path": "/api/calls/:id", "owner": "api", "desc": "Call detail: call + agent + transcript + analysis.", "returns": "CallDetail" },
+    { "method": "POST", "path": "/api/analyze/:callId", "owner": "llm", "desc": "Run/re-run analysis on one call. Idempotent via transcriptHash cache. Body: { force?:boolean }.", "returns": "Analysis" },
+    { "method": "POST", "path": "/api/sync", "owner": "ghl", "desc": "FUNCTIONAL: poll GHL /voice-ai/dashboard/call-logs via PIT, ingest new calls. Returns ingested count.", "returns": "{ ingested:number, errors?:string[] }" },
+    { "method": "POST", "path": "/api/webhooks/ghl", "owner": "ghl", "desc": "FUNCTIONAL: receive Voice AI call-completed / transcript-generated webhook, upsert call+transcript, trigger analysis.", "returns": "{ ok:boolean }" },
+    { "method": "GET", "path": "/api/context", "owner": "ghl", "desc": "Decode GHL signed user-context (iframe). Body/query: { encryptedData }. Returns location/user identity.", "returns": "{ locationId?:string, userId?:string, ... }" }
+  ],
+  "slices": {
+    "data": {
+      "owns": ["shared/types.ts (already written, read-only now)", "server/services/db.ts", "server/data/seed.ts", "data/seed/transcripts.json", "server/api/seed.post.ts"],
+      "produces": "Storage helpers (getAgent, listAgents, upsertCall, getTranscript, getAnalysis, upsertAnalysis...) over Nitro useStorage; >=3 agents and >=6 realistic transcripts with DELIBERATE deviations/failures/missed-opportunities so the dashboard has signal."
+    },
+    "api": {
+      "owns": ["server/api/agents/index.get.ts", "server/api/agents/[id].get.ts", "server/api/calls/index.get.ts", "server/api/calls/[id].get.ts", "server/utils/rollup.ts"],
+      "produces": "Read routes that aggregate stored analyses into FleetStats/AgentHealth/CallListItem/CallDetail. Tolerates calls without analysis (score null)."
+    },
+    "llm": {
+      "owns": ["server/services/llm/index.ts", "server/services/llm/types.ts", "server/services/llm/ollama.ts", "server/services/llm/anthropic.ts", "server/services/llm/mock.ts", "server/services/analysis.ts", "server/services/criteria.ts", "server/api/analyze/[callId].post.ts"],
+      "produces": "LLMProvider interface { complete<T>(opts:{system,user,schema,schemaName}):Promise<T> }; Ollama impl (POST /api/chat, format=jsonSchema, stream:false); Anthropic impl (consult claude-api skill; model claude-opus-4-8, output_config.format json_schema); mock impl (deterministic). analysis.ts builds prompt from agent goal/script/criteria + turn-indexed transcript, calls provider, zod-validates AnalysisResult, returns Analysis. criteria.ts derives successCriteria from goal/script if missing (cached on agent)."
+    },
+    "ui": {
+      "owns": ["app/layouts/default.vue", "app/pages/index.vue", "app/pages/agents/[id].vue", "app/pages/calls/[id].vue", "app/components/KpiCard.vue", "app/components/HealthChart.vue", "app/components/AgentTable.vue", "app/components/FindingCard.vue", "app/components/RecommendationCard.vue", "app/components/UseActionList.vue", "app/components/TranscriptViewer.vue", "app/components/SeverityBadge.vue", "app/composables/useApi.ts"],
+      "produces": "Three screens using shadcn-vue (app/components/ui) + @unovis/vue charts + lucide-vue-next icons. Beautiful, GHL-native chrome. Call drill-down highlights flagged transcript turns; clicking a finding scrolls/highlights cited turns.",
+      "constraints": "DO NOT edit package.json (all shadcn components pre-installed). Use existing app/components/ui/*. Fetch via useFetch/$fetch against the API routes."
+    },
+    "ghl": {
+      "owns": ["server/services/ghl.ts", "server/api/sync.post.ts", "server/api/webhooks/ghl.post.ts", "server/api/context.get.ts", "server/utils/ghlContext.ts", "app/composables/useGhlBridge.ts"],
+      "produces": "PIT-authenticated GHL REST client (call-logs list/get, agents) using runtimeConfig.ghlPitToken + ghlApiBase; maps GHL call-log -> Call+Transcript; sync route; webhook receiver; signed user-context decrypt (AES via shared secret) + postMessage bridge composable."
+    },
+    "docs": {
+      "owns": ["README.md", ".env.example", "docs/install.md"],
+      "produces": "README: architecture diagram (text), Team-of-One ownership (Product/Design/Eng/QA), functional-vs-mocked table, GHL sandbox install steps. .env.example with all runtimeConfig keys."
+    }
+  },
+  "llmIO": {
+    "input": "system: Voice AI QA analyst role + definitions(deviation/failure/missed_opportunity) + severity rubric + 'cite evidence by turn index, never invent turns'. user: agent goal+script+successCriteria, then turn-indexed transcript ([0] agent: ..., [1] customer: ...).",
+    "output": "JSON matching AnalysisResultSchema (summary, scorecard, findings[], recommendations[], useActions[])."
+  },
+  "env": {
+    "LLM_PROVIDER": "ollama|anthropic|mock (default ollama)",
+    "OLLAMA_BASE_URL": "http://localhost:11434",
+    "OLLAMA_MODEL": "qwen2.5:14b",
+    "ANTHROPIC_API_KEY": "optional",
+    "ANTHROPIC_MODEL": "claude-opus-4-8",
+    "GHL_PIT_TOKEN": "sandbox PIT",
+    "GHL_API_BASE": "https://services.leadconnectorhq.com",
+    "GHL_SHARED_SECRET": "custom-page shared secret"
+  }
+}

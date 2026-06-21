@@ -1,0 +1,22 @@
+{
+  "source": "FSB_assignment.pdf — Voice AI Observability Copilot",
+  "requirements": [
+    { "id": "setup-1", "category": "setup", "quote": "Use a sandbox account from the HighLevel Marketplace.", "acceptance": "README documents sandbox creation + PIT generation steps.", "mocked_ok": true },
+    { "id": "setup-2", "category": "setup", "quote": "Integrate via custom JS or a GHL marketplace app that allows code to reside within the customer account.", "acceptance": "App embeds as a Custom Page iframe; CSP frame-ancestors allows GHL; useGhlBridge handshake + signed-context decode exist.", "mocked_ok": false },
+    { "id": "monitor-1", "category": "monitor", "quote": "Ingest and analyze existing Voice AI agent call transcripts.", "acceptance": "Webhook + PIT sync ingest calls/transcripts; analyze route produces an Analysis. Seeded transcripts demonstrate content.", "mocked_ok": false },
+    { "id": "monitor-2", "category": "monitor", "quote": "Set observability parameters based on the agent's specific goals or script.", "acceptance": "Agent has successCriteria; criteria.ts derives them from goal/script when absent.", "mocked_ok": false },
+    { "id": "monitor-3", "category": "monitor", "quote": "Identify deviations, failures, or missed opportunities against success criteria (KPIs).", "acceptance": "Analysis.findings include type deviation|failure|missed_opportunity tied to criteria with severity + evidence turns.", "mocked_ok": false },
+    { "id": "analyze-1", "category": "analyze", "quote": "Build an intuitive dashboard that visualizes performance issues across agents.", "acceptance": "Fleet dashboard with KPI cards, trend chart, agent table; per-agent + per-call drill-down. shadcn-vue, beautiful.", "mocked_ok": false },
+    { "id": "analyze-2", "category": "analyze", "quote": "Provide immediate recommendations for prompt/script/agent adjustments based on identified failures.", "acceptance": "Analysis.recommendations target prompt|script|agent_config|training with paste-ready suggestedChange, shown in UI.", "mocked_ok": false },
+    { "id": "analyze-3", "category": "analyze", "quote": "Highlight 'Use Actions' (specific segments of a call that require human intervention or script training).", "acceptance": "Analysis.useActions flag turnRange + recommendedAction; UI highlights those transcript segments.", "mocked_ok": false },
+    { "id": "deliver-1", "category": "deliverable", "quote": "Github repo URL for the widget/marketplace app and backend logic (Node.js backend, Vue.js frontend).", "acceptance": "Single Nuxt repo: Nitro backend + Vue frontend. Committed.", "mocked_ok": false },
+    { "id": "deliver-2", "category": "deliverable", "quote": "Documented steps to install and run the observability suite inside a HighLevel sandbox.", "acceptance": "README/docs/install.md with end-to-end steps.", "mocked_ok": false },
+    { "id": "deliver-3", "category": "deliverable", "quote": "Demo (2-5 min): ingesting+monitoring, unified dashboard, AI recommendations for a specific agent.", "acceptance": "Demo script in README; flows runnable locally.", "mocked_ok": true },
+    { "id": "deliver-4", "category": "deliverable", "quote": "README describing architecture and how you handled 'Team of One' ownership (Product, Design, Engineering & QA).", "acceptance": "README has architecture + Team-of-One section.", "mocked_ok": false },
+    { "id": "deliver-5", "category": "deliverable", "quote": "Notes on what is functional (real-time transcript ingestion) vs what is mocked.", "acceptance": "README functional-vs-mocked table.", "mocked_ok": false },
+    { "id": "eval-1", "category": "eval", "quote": "Product Thinking + UI/UX: customer-centric, intuitive, seamlessly integrated into HighLevel.", "acceptance": "GHL-native chrome, intuitive flows, embeds in iframe.", "mocked_ok": false },
+    { "id": "eval-2", "category": "eval", "quote": "Completeness: closes the loop from raw logs to actionable recommendations.", "acceptance": "End-to-end: transcript -> analysis -> recommendation -> UI, verified by smoke test.", "mocked_ok": false },
+    { "id": "eval-3", "category": "eval", "quote": "Technical Integrity: clarity of observability architecture and recommendations logic.", "acceptance": "Pluggable LLM, zod-validated structured output, clear service layering.", "mocked_ok": false },
+    { "id": "eval-4", "category": "eval", "quote": "Manual Code Review: only non-slop code.", "acceptance": "No dead stubs, no lorem, types used, per-slice review passed.", "mocked_ok": false }
+  ]
+}
