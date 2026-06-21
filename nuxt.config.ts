@@ -8,16 +8,6 @@ export default defineNuxtConfig({
 
   css: ['~/assets/css/main.css'],
 
-  vite: {
-    plugins: [tailwindcss()]
-  },
-
-  // shadcn-vue: components are copied into app/components/ui
-  shadcn: {
-    prefix: '',
-    componentDir: '~/components/ui'
-  },
-
   // Secrets stay server-side; public values are exposed to the client.
   runtimeConfig: {
     llmProvider: process.env.LLM_PROVIDER || 'ollama',
@@ -44,6 +34,10 @@ export default defineNuxtConfig({
 
   compatibilityDate: '2025-01-15',
 
+  vite: {
+    plugins: [tailwindcss()]
+  },
+
   eslint: {
     config: {
       stylistic: {
@@ -51,5 +45,11 @@ export default defineNuxtConfig({
         braceStyle: '1tbs'
       }
     }
+  },
+
+  // shadcn-vue: components are copied into app/components/ui
+  shadcn: {
+    prefix: '',
+    componentDir: '~/components/ui'
   }
 })

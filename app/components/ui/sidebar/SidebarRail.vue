@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import type { HTMLAttributes } from "vue"
+import type { HTMLAttributes } from 'vue'
 import { cn } from '~/lib/utils'
-import { useSidebar } from "./utils"
+import { useSidebar } from './utils'
 
 const props = defineProps<{
-  class?: HTMLAttributes["class"]
+  class?: HTMLAttributes['class']
 }>()
 
 const { toggleSidebar } = useSidebar()
@@ -24,7 +24,7 @@ const { toggleSidebar } = useSidebar()
       'hover:group-data-[collapsible=offcanvas]:bg-sidebar group-data-[collapsible=offcanvas]:translate-x-0 group-data-[collapsible=offcanvas]:after:left-full',
       '[[data-side=left][data-collapsible=offcanvas]_&]:-right-2',
       '[[data-side=right][data-collapsible=offcanvas]_&]:-left-2',
-      props.class,
+      props.class
     )"
     @click="toggleSidebar"
   >

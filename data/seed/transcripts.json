@@ -1,0 +1,212 @@
+{
+  "agents": [
+    {
+      "id": "agent-booking",
+      "name": "Bella — Appointment Booking",
+      "goal": "Book qualified dental-cleaning appointments for Bright Smile Dental. Confirm a specific date and time on the calendar, capture and read back the patient's callback number, and verify insurance provider before ending the call.",
+      "script": "Greet the caller warmly and identify as Bella from Bright Smile Dental. Ask what they need. Offer the next two available cleaning slots. Once they pick a slot, restate the exact date and time and ask them to confirm. Collect the best callback number and READ IT BACK digit by digit. Ask which dental insurance they carry and note it. Close by confirming the appointment details and a reminder text. Never quote a price without checking the current fee schedule; cleanings start at $89 for new patients.",
+      "successCriteria": [
+        { "id": "book-slot-confirmed", "label": "Appointment slot explicitly confirmed", "kind": "outcome", "weight": 0.35, "detector": "Agent states a specific date and time and the caller verbally confirms that exact slot before the call ends." },
+        { "id": "book-callback-readback", "label": "Callback number read back", "kind": "behavior", "weight": 0.25, "detector": "Agent collects the callback number and reads it back to the caller for confirmation." },
+        { "id": "book-insurance-captured", "label": "Insurance provider captured", "kind": "behavior", "weight": 0.2, "detector": "Agent asks which dental insurance the caller carries and acknowledges the answer." },
+        { "id": "book-accurate-pricing", "label": "Accurate pricing", "kind": "compliance", "weight": 0.1, "detector": "Any price quoted matches the fee schedule (new-patient cleaning starts at $89). No fabricated or discounted figures." },
+        { "id": "book-warm-tone", "label": "Warm, professional tone", "kind": "tone", "weight": 0.1, "detector": "Agent stays polite and patient, does not rush or talk over the caller." }
+      ]
+    },
+    {
+      "id": "agent-sales",
+      "name": "Max — Lead Qualification",
+      "goal": "Qualify inbound solar leads for SunPeak Energy. Determine homeownership, average monthly electric bill, and roof type; capture buying signals and book a free in-home consultation for qualified homeowners.",
+      "script": "Introduce yourself as Max from SunPeak Energy. Thank them for the inquiry. Qualify with three questions: Do you own your home? What's your average monthly electricity bill? Is your roof asphalt shingle, metal, or tile? If they own and their bill is over $120, they're qualified — book a free in-home consultation and confirm a day. Listen for buying signals ('how soon', 'what's the cost', 'my neighbor got panels') and lean in. Federal tax credit is 30% — never overstate it. Always offer to book the consultation when intent is shown.",
+      "successCriteria": [
+        { "id": "sales-qualify-questions", "label": "Qualification questions asked", "kind": "behavior", "weight": 0.25, "detector": "Agent asks about homeownership, monthly electric bill, and roof type." },
+        { "id": "sales-buying-signal", "label": "Buying signals acted on", "kind": "behavior", "weight": 0.25, "detector": "When the caller expresses interest or readiness, the agent acknowledges it and moves toward booking a consultation." },
+        { "id": "sales-consult-booked", "label": "Consultation booked for qualified lead", "kind": "outcome", "weight": 0.3, "detector": "For a qualified homeowner the agent secures a specific day/time for the in-home consultation." },
+        { "id": "sales-credit-accuracy", "label": "Accurate incentive claims", "kind": "compliance", "weight": 0.1, "detector": "Federal tax credit stated as 30% and no other savings figures are fabricated or exaggerated." },
+        { "id": "sales-no-pressure", "label": "Consultative, low-pressure tone", "kind": "tone", "weight": 0.1, "detector": "Agent is consultative and does not pressure or dismiss the caller." }
+      ]
+    },
+    {
+      "id": "agent-support",
+      "name": "Aria — Support & Retention",
+      "goal": "Resolve billing and service issues for FiberNet customers and retain at-risk subscribers. Acknowledge the issue empathetically, resolve or escalate, and offer a retention path before any cancellation.",
+      "script": "Identify as Aria from FiberNet Support. Acknowledge the customer's frustration first, then ask clarifying questions. For billing disputes, verify the charge and explain it; offer a one-time credit up to $25 when appropriate. For cancellations, ALWAYS ask the reason and offer a retention option (loyalty discount or plan change) before processing. Never talk over an upset customer. If you cannot resolve it, escalate to a human supervisor and set expectations on timing. Do not promise refunds you cannot authorize.",
+      "successCriteria": [
+        { "id": "support-empathy", "label": "Empathy acknowledged", "kind": "tone", "weight": 0.25, "detector": "Agent acknowledges the customer's frustration before problem-solving and does not interrupt or talk over them." },
+        { "id": "support-resolve-escalate", "label": "Issue resolved or properly escalated", "kind": "outcome", "weight": 0.3, "detector": "The agent either resolves the issue or escalates to a supervisor with a clear timing expectation." },
+        { "id": "support-retention-offer", "label": "Retention offered before cancel", "kind": "behavior", "weight": 0.25, "detector": "Before processing a cancellation the agent asks the reason and offers a retention option (discount or plan change)." },
+        { "id": "support-no-overpromise", "label": "No unauthorized promises", "kind": "compliance", "weight": 0.1, "detector": "Agent does not promise refunds, credits beyond $25, or timelines it cannot authorize." },
+        { "id": "support-clear-next-step", "label": "Clear next step set", "kind": "behavior", "weight": 0.1, "detector": "Customer leaves the call knowing exactly what happens next and when." }
+      ]
+    }
+  ],
+  "calls": [
+    {
+      "id": "call-book-001",
+      "agentId": "agent-booking",
+      "direction": "inbound",
+      "durationSec": 182,
+      "outcome": "booked",
+      "contactName": "Jennifer Alvarez",
+      "startedAt": "2026-06-15T15:04:00.000Z",
+      "transcript": [
+        { "speaker": "agent", "text": "Thanks for calling Bright Smile Dental, this is Bella. How can I help you today?" },
+        { "speaker": "customer", "text": "Hi, I'd like to book a cleaning. I'm a new patient." },
+        { "speaker": "agent", "text": "Wonderful, welcome! I can get you in. I have Thursday June 18th at 10:00 AM, or Friday June 19th at 2:30 PM. Which works better?" },
+        { "speaker": "customer", "text": "Friday afternoon is better for me." },
+        { "speaker": "agent", "text": "Great. So that's Friday, June 19th at 2:30 PM for a new-patient cleaning. Can you confirm that works?" },
+        { "speaker": "customer", "text": "Yes, that's perfect." },
+        { "speaker": "agent", "text": "What's the best callback number for you, in case we need to reach you?" },
+        { "speaker": "customer", "text": "It's 415-555-0192." },
+        { "speaker": "agent", "text": "Let me read that back: 4-1-5, 5-5-5, 0-1-9-2. Did I get that right?" },
+        { "speaker": "customer", "text": "That's correct." },
+        { "speaker": "agent", "text": "And which dental insurance do you carry?" },
+        { "speaker": "customer", "text": "Delta Dental." },
+        { "speaker": "agent", "text": "Perfect, I've noted Delta Dental. A new-patient cleaning starts at $89, and we'll verify your coverage beforehand. You're all set for Friday, June 19th at 2:30 PM, and I'll send a reminder text to that number. Anything else?" },
+        { "speaker": "customer", "text": "Nope, thank you so much!" },
+        { "speaker": "agent", "text": "My pleasure, Jennifer. See you Friday!" }
+      ]
+    },
+    {
+      "id": "call-book-002",
+      "agentId": "agent-booking",
+      "direction": "inbound",
+      "durationSec": 141,
+      "outcome": "booked",
+      "contactName": "Marcus Webb",
+      "startedAt": "2026-06-16T17:22:00.000Z",
+      "transcript": [
+        { "speaker": "agent", "text": "Bright Smile Dental, this is Bella. How can I help?" },
+        { "speaker": "customer", "text": "I need to schedule a cleaning sometime next week." },
+        { "speaker": "agent", "text": "Sure. I have Tuesday June 23rd at 9:00 AM or Wednesday June 24th at 4:00 PM." },
+        { "speaker": "customer", "text": "Tuesday at nine works." },
+        { "speaker": "agent", "text": "Great, Tuesday June 23rd at 9:00 AM. Can you confirm that time?" },
+        { "speaker": "customer", "text": "Yep, confirmed." },
+        { "speaker": "agent", "text": "And what insurance do you have?" },
+        { "speaker": "customer", "text": "Cigna." },
+        { "speaker": "agent", "text": "Got it, Cigna. By the way, a cleaning for you would be $49 with your plan." },
+        { "speaker": "customer", "text": "Oh nice, even cheaper than I thought." },
+        { "speaker": "agent", "text": "You're all booked for Tuesday at 9. Have a great day!" },
+        { "speaker": "customer", "text": "Wait, don't you need my phone number?" },
+        { "speaker": "agent", "text": "We have it from your caller ID, you're all set. Bye now!" }
+      ]
+    },
+    {
+      "id": "call-book-003",
+      "agentId": "agent-booking",
+      "direction": "outbound",
+      "durationSec": 128,
+      "outcome": "not_booked",
+      "contactName": "Priya Nair",
+      "startedAt": "2026-06-17T16:10:00.000Z",
+      "transcript": [
+        { "speaker": "agent", "text": "Hi, this is Bella from Bright Smile Dental, calling about scheduling your overdue cleaning. Is now an okay time?" },
+        { "speaker": "customer", "text": "Um, I'm actually about to walk into a meeting. Can you call back?" },
+        { "speaker": "agent", "text": "It'll just take a second. I have Monday at 8 AM or Monday at 8:30 AM available." },
+        { "speaker": "customer", "text": "I really can't talk right now, both of those are during my work hours anyway." },
+        { "speaker": "agent", "text": "Okay, well, those are the only slots I'm showing. Should I just put you down for the 8 AM?" },
+        { "speaker": "customer", "text": "No, please don't book anything. I need to look at my calendar." },
+        { "speaker": "agent", "text": "I understand. When would be a better time for me to reach you to find a slot that fits?" },
+        { "speaker": "customer", "text": "Honestly, just email me the available times and I'll pick one. I'm out of evenings this week." },
+        { "speaker": "agent", "text": "We don't really do email scheduling. It's easier if I just book you now." },
+        { "speaker": "customer", "text": "I already said I can't do mornings. Please don't push." },
+        { "speaker": "agent", "text": "Alright. Feel free to call us back when you're ready. Goodbye." },
+        { "speaker": "customer", "text": "Sure, bye." }
+      ]
+    },
+    {
+      "id": "call-sales-001",
+      "agentId": "agent-sales",
+      "direction": "inbound",
+      "durationSec": 214,
+      "outcome": "qualified_booked",
+      "contactName": "Daniel Cho",
+      "startedAt": "2026-06-16T18:45:00.000Z",
+      "transcript": [
+        { "speaker": "agent", "text": "Hi, this is Max from SunPeak Energy — thanks for requesting info on solar! Do you have a couple minutes?" },
+        { "speaker": "customer", "text": "Yeah, sure. My neighbor just got panels and his bill dropped a ton, so I'm curious." },
+        { "speaker": "agent", "text": "That's a great signal — a lot of our installs happen on a single street once one neighbor sees the savings. Let me ask a few quick things. Do you own your home?" },
+        { "speaker": "customer", "text": "Yes, owned for about six years." },
+        { "speaker": "agent", "text": "Perfect. Roughly what's your average monthly electric bill?" },
+        { "speaker": "customer", "text": "Around $210, more in the summer." },
+        { "speaker": "agent", "text": "And what's your roof — asphalt shingle, metal, or tile?" },
+        { "speaker": "customer", "text": "Asphalt shingle, pretty new." },
+        { "speaker": "agent", "text": "You're an ideal candidate. With a bill that size and a newer shingle roof, a system would pay off quickly, and there's a 30% federal tax credit on the installed cost." },
+        { "speaker": "customer", "text": "How soon could someone actually come look at it?" },
+        { "speaker": "agent", "text": "I love that you're ready to move. I can book a free in-home consultation — I have Thursday June 18th at 6 PM or Saturday June 20th at 11 AM." },
+        { "speaker": "customer", "text": "Saturday at 11 is great." },
+        { "speaker": "agent", "text": "Done — Saturday June 20th at 11 AM, a SunPeak design consultant will come out, no cost or obligation. I'll text you a confirmation. Sound good?" },
+        { "speaker": "customer", "text": "Perfect, thanks Max." }
+      ]
+    },
+    {
+      "id": "call-sales-002",
+      "agentId": "agent-sales",
+      "direction": "inbound",
+      "durationSec": 168,
+      "outcome": "qualified_not_booked",
+      "contactName": "Rebecca Stone",
+      "startedAt": "2026-06-17T19:30:00.000Z",
+      "transcript": [
+        { "speaker": "agent", "text": "Hi, Max with SunPeak Energy. Thanks for reaching out about solar. Do you own your home?" },
+        { "speaker": "customer", "text": "I do, yes." },
+        { "speaker": "agent", "text": "Great. What's your average monthly electricity bill?" },
+        { "speaker": "customer", "text": "Probably $180 or so." },
+        { "speaker": "agent", "text": "And the roof type — shingle, metal, or tile?" },
+        { "speaker": "customer", "text": "Metal roof. Honestly, what would something like this cost me? I'm ready to do this if the numbers work." },
+        { "speaker": "agent", "text": "It really depends on the system size. There's a lot of factors." },
+        { "speaker": "customer", "text": "Okay, but ballpark? I'm pretty serious about moving forward soon." },
+        { "speaker": "agent", "text": "Yeah, it varies. Also just so you know, with our incentives you can basically get solar for almost free — like a 70% credit when you stack everything." },
+        { "speaker": "customer", "text": "Wow, 70%? That sounds almost too good." },
+        { "speaker": "agent", "text": "Yep, the savings are huge. Anyway, was there anything else I can help with today?" },
+        { "speaker": "customer", "text": "I guess not. I thought we'd set up a visit or something." },
+        { "speaker": "agent", "text": "You can always call back if you want to. Have a good one." }
+      ]
+    },
+    {
+      "id": "call-support-001",
+      "agentId": "agent-support",
+      "direction": "inbound",
+      "durationSec": 236,
+      "outcome": "resolved",
+      "contactName": "Tom Becker",
+      "startedAt": "2026-06-15T14:12:00.000Z",
+      "transcript": [
+        { "speaker": "agent", "text": "Thank you for calling FiberNet Support, this is Aria. How can I help you today?" },
+        { "speaker": "customer", "text": "I'm really annoyed. I got charged $30 extra this month and nobody told me why." },
+        { "speaker": "agent", "text": "I completely understand the frustration of an unexpected charge — let's get to the bottom of it. Can you confirm the account email so I can pull it up?" },
+        { "speaker": "customer", "text": "It's tbecker@gmail.com." },
+        { "speaker": "agent", "text": "Thank you. I see it — the $30 is a one-time install fee for the mesh extender you added on May 28th. It should have been waived during your promo." },
+        { "speaker": "customer", "text": "Right, it was supposed to be free with my plan." },
+        { "speaker": "agent", "text": "You're absolutely correct. I'm applying a one-time $30 credit right now to make it right, and it'll show on your next statement within two billing cycles — actually it'll post within 24 hours." },
+        { "speaker": "customer", "text": "Okay, that's better. Thank you." },
+        { "speaker": "agent", "text": "Of course. So to recap: the $30 install fee is credited and will post within 24 hours, and your plan continues at the promo rate. Is there anything else I can help with, Tom?" },
+        { "speaker": "customer", "text": "No, that covers it. Appreciate it." },
+        { "speaker": "agent", "text": "Happy to help. Have a great day!" }
+      ]
+    },
+    {
+      "id": "call-support-002",
+      "agentId": "agent-support",
+      "direction": "inbound",
+      "durationSec": 258,
+      "outcome": "cancelled",
+      "contactName": "Sandra Mills",
+      "startedAt": "2026-06-17T20:05:00.000Z",
+      "transcript": [
+        { "speaker": "customer", "text": "I want to cancel my service. Today." },
+        { "speaker": "agent", "text": "Okay, I can process a cancellation. Let me pull up your—" },
+        { "speaker": "customer", "text": "I've been a customer for five years and your service has been dropping every single night this—" },
+        { "speaker": "agent", "text": "Right, so I just need to confirm your account number to start the cancellation." },
+        { "speaker": "customer", "text": "Will you let me finish? The outages are why I'm leaving. I work from home and—" },
+        { "speaker": "agent", "text": "Understood. The account number, please?" },
+        { "speaker": "customer", "text": "It's 88-4471." },
+        { "speaker": "agent", "text": "Thank you. I've submitted the cancellation, it's effective at the end of your billing cycle." },
+        { "speaker": "customer", "text": "That's it? You're not even going to try to fix the outages or keep me?" },
+        { "speaker": "agent", "text": "Your cancellation is confirmed. Is there anything else?" },
+        { "speaker": "customer", "text": "Unbelievable. No." },
+        { "speaker": "agent", "text": "Thank you for being a FiberNet customer. Goodbye." }
+      ]
+    }
+  ]
+}

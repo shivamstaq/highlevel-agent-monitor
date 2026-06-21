@@ -92,6 +92,133 @@ export const CallSchema = z.object({
 export type Call = z.infer<typeof CallSchema>
 
 /* ----------------------------------------------------------------------------
+ * Expected Call Flow (design intent — generated at agent creation)
+ *
+ * The agent's goal/script compiled into a decision graph BEFORE any call. This is
+ * the "observability parameter set": at analysis time the actual call is aligned
+ * to this graph (process-mining conformance) to measure drift.
+ * ------------------------------------------------------------------------- */
+export const FlowNodeKindSchema = z.enum([
+  'greeting', 'intent', 'qualify', 'collect', 'confirm', 'objection', 'action', 'close'
+])
+export type FlowNodeKind = z.infer<typeof FlowNodeKindSchema>
+
+export const FlowNodeSchema = z.object({
+  id: z.string(), // stable slug, e.g. 'collect_callback'
+  label: z.string(),
+  kind: FlowNodeKindSchema,
+  /** true = should occur on every call; false = conditional branch (skipping is NOT drift). */
+  expected: z.boolean().default(true),
+  branchConditions: z.array(z.string()).default([])
+})
+export type FlowNode = z.infer<typeof FlowNodeSchema>
+
+export const FlowEdgeSchema = z.object({
+  from: z.string(),
+  to: z.string(),
+  condition: z.string().optional()
+})
+export type FlowEdge = z.infer<typeof FlowEdgeSchema>
+
+/** What the LLM emits (no bookkeeping fields). */
+export const ExpectedFlowResultSchema = z.object({
+  nodes: z.array(FlowNodeSchema).min(2).max(12),
+  edges: z.array(FlowEdgeSchema)
+})
+export type ExpectedFlowResult = z.infer<typeof ExpectedFlowResultSchema>
+
+export const ExpectedFlowSchema = ExpectedFlowResultSchema.extend({
+  agentId: z.string(),
+  provider: z.string(),
+  model: z.string(),
+  specHash: z.string(), // hash(goal+script+criteria) — idempotent regen + auto-invalidate
+  createdAt: z.string()
+})
+export type ExpectedFlow = z.infer<typeof ExpectedFlowSchema>
+
+/* ----------------------------------------------------------------------------
+ * Call Event Timeline (realtime voice-pipeline trace)
+ *
+ * Models the LiveKit-style pipeline: VAD -> STT -> EOU -> LLM -> TTS -> audio out.
+ * Turn boundaries can be REAL (ingested from a per-sentence transcription) while
+ * the per-stage latency decomposition is MODELED on published LiveKit budgets.
+ * latency identity: e2e_latency ~= end_of_utterance_delay + llm.ttft + tts.ttfb
+ * ------------------------------------------------------------------------- */
+export const StageSchema = z.enum([
+  'user_speech', 'vad', 'stt', 'eou', 'llm', 'tts', 'agent_speech', 'interruption'
+])
+export type Stage = z.infer<typeof StageSchema>
+
+export const CallEventSchema = z.object({
+  id: z.string(),
+  callId: z.string(),
+  turnIdx: z.number().int().nonnegative().optional(),
+  stage: StageSchema,
+  type: z.string(), // 'partial' | 'final' | 'ttft' | 'ttfb' | 'speech' | 'barge_in' | ...
+  tStartMs: z.number().nonnegative(),
+  tEndMs: z.number().nonnegative(),
+  latencyMs: z.number().nonnegative().optional(),
+  meta: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).default({})
+})
+export type CallEvent = z.infer<typeof CallEventSchema>
+
+export const StageLatencySchema = z.object({
+  stage: StageSchema,
+  p50Ms: z.number(),
+  p95Ms: z.number(),
+  maxMs: z.number(),
+  count: z.number().int()
+})
+export type StageLatency = z.infer<typeof StageLatencySchema>
+
+export const CallTimelineSchema = z.object({
+  callId: z.string(),
+  source: z.enum(['modeled', 'ingested']), // honesty flag, surfaced in UI
+  modelVersion: z.string(),
+  events: z.array(CallEventSchema),
+  perStageLatency: z.array(StageLatencySchema),
+  interruptionCount: z.number().int().nonnegative(),
+  avgResponseLatencyMs: z.number().nonnegative(), // EOU end -> first agent audio (headline metric)
+  totalMs: z.number().nonnegative()
+})
+export type CallTimeline = z.infer<typeof CallTimelineSchema>
+
+/* ----------------------------------------------------------------------------
+ * Flow conformance / drift (process-mining alignment)
+ * ------------------------------------------------------------------------- */
+export const NodeStatusSchema = z.enum(['hit', 'skipped', 'out_of_order', 'extra'])
+export type NodeStatus = z.infer<typeof NodeStatusSchema>
+
+export const NodeAlignmentSchema = z.object({
+  nodeId: z.string().optional(), // expected node id (absent for 'extra')
+  label: z.string(),
+  kind: FlowNodeKindSchema,
+  status: NodeStatusSchema,
+  driftScore: z.number().min(0).max(1), // 0 = perfect, 1 = max drift
+  matchedTurnIdxs: z.array(z.number().int().nonnegative()).default([]),
+  note: z.string().optional()
+})
+export type NodeAlignment = z.infer<typeof NodeAlignmentSchema>
+
+export const FlowAlignmentSchema = z.object({
+  callId: z.string(),
+  agentId: z.string(),
+  conformanceScore: z.number().min(0).max(100), // headline: how closely actual followed intent
+  fitness: z.number().min(0).max(1), // process-mining fitness
+  nodeAlignments: z.array(NodeAlignmentSchema),
+  actualPath: z.array(z.string()) // node ids the call actually traversed, in order
+})
+export type FlowAlignment = z.infer<typeof FlowAlignmentSchema>
+
+/** LLM-assigned mapping of a transcript turn to its enacted flow node. */
+export const StageLabelSchema = z.object({
+  turnIdx: z.number().int().nonnegative(),
+  nodeId: z.string().nullable(),
+  kind: FlowNodeKindSchema
+})
+export type StageLabel = z.infer<typeof StageLabelSchema>
+
+/* ----------------------------------------------------------------------------
  * Analysis output (this schema is ALSO emitted to the LLM as its JSON contract)
  * ------------------------------------------------------------------------- */
 export const CriterionScoreSchema = z.object({
@@ -151,7 +278,9 @@ export const AnalysisResultSchema = z.object({
   scorecard: ScorecardSchema,
   findings: z.array(FindingSchema),
   recommendations: z.array(RecommendationSchema),
-  useActions: z.array(UseActionSchema)
+  useActions: z.array(UseActionSchema),
+  /** Per-turn mapping to the expected-flow node it enacts; drives conformance. */
+  stageLabels: z.array(StageLabelSchema).default([])
 })
 export type AnalysisResult = z.infer<typeof AnalysisResultSchema>
 
@@ -163,7 +292,9 @@ export const AnalysisSchema = AnalysisResultSchema.extend({
   provider: z.string(),
   model: z.string(),
   transcriptHash: z.string(),
-  createdAt: z.string()
+  createdAt: z.string(),
+  /** Drift of the actual call against the agent's expected flow. */
+  flowAlignment: FlowAlignmentSchema.optional()
 })
 export type Analysis = z.infer<typeof AnalysisSchema>
 
@@ -196,7 +327,9 @@ export const CallDetailSchema = z.object({
   call: CallSchema,
   agent: AgentSchema,
   transcript: TranscriptSchema,
-  analysis: AnalysisSchema.nullable()
+  analysis: AnalysisSchema.nullable(),
+  timeline: CallTimelineSchema.nullable(),
+  expectedFlow: ExpectedFlowSchema.nullable()
 })
 export type CallDetail = z.infer<typeof CallDetailSchema>
 

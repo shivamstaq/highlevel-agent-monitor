@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import type { HTMLAttributes } from "vue"
+import type { HTMLAttributes } from 'vue'
 import { cn } from '~/lib/utils'
 import { Input } from '~/components/ui/input'
 
 const props = defineProps<{
-  class?: HTMLAttributes["class"]
+  class?: HTMLAttributes['class']
 }>()
 </script>
 
@@ -14,7 +14,7 @@ const props = defineProps<{
     data-sidebar="input"
     :class="cn(
       'bg-background h-8 w-full shadow-none',
-      props.class,
+      props.class
     )"
   >
     <slot />
