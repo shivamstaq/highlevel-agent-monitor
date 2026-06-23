@@ -1,7 +1,10 @@
+<!-- CREATED (our eval layer) — the per-call Use Action worklist. Each item is a
+     call segment (entryRange into Transcript.entries) that needs a human:
+     review, coach the agent, update the flow, or escalate. -->
 <script setup lang="ts">
 import type { UseAction, UseActionKind } from '#shared/types'
 import { computed } from 'vue'
-import { Eye, GraduationCap, PhoneForwarded, Wrench } from 'lucide-vue-next'
+import { Eye, GitBranch, GraduationCap, PhoneForwarded, Wrench } from 'lucide-vue-next'
 import { useTone } from '~/composables/useTone'
 import { cn } from '~/lib/utils'
 
@@ -19,19 +22,19 @@ const { toneClasses } = useTone()
 
 /**
  * Use Action kind -> icon + tone. Tone routes through useTone semantic tokens
- * (no raw sky-/violet-/amber-/red utilities): escalate = danger, update_script
- * = warning, coach_agent / review = neutral.
+ * (no raw sky-/violet-/amber-/red utilities): escalate = danger, update_flow =
+ * warning, coach_agent / review = neutral.
  */
 const kindMeta: Record<UseActionKind, { label: string, icon: typeof Eye, tone: ReturnType<typeof toneClasses> }> = {
   review: { label: 'Review', icon: Eye, tone: toneClasses('neutral') },
   coach_agent: { label: 'Coach agent', icon: GraduationCap, tone: toneClasses('neutral') },
-  update_script: { label: 'Update script', icon: Wrench, tone: toneClasses('warning') },
+  update_flow: { label: 'Update flow', icon: GitBranch, tone: toneClasses('warning') },
   escalate: { label: 'Escalate', icon: PhoneForwarded, tone: toneClasses('danger') }
 }
 
 function isActive(ua: UseAction): boolean {
   const r = props.activeRange
-  return !!r && r[0] === ua.turnRange[0] && r[1] === ua.turnRange[1]
+  return !!r && r[0] === ua.entryRange[0] && r[1] === ua.entryRange[1]
 }
 
 const sorted = computed(() => props.useActions)
@@ -49,7 +52,7 @@ const sorted = computed(() => props.useActions)
     -->
     <p class="text-[12px] leading-relaxed text-muted-foreground">
       <span class="font-medium text-foreground">Use Actions</span> are specific call
-      segments that need a human — for review, coaching, or script training.
+      segments that need a human — for review, coaching, flow training, or escalation.
     </p>
 
     <div class="flex flex-col gap-2">
@@ -62,7 +65,7 @@ const sorted = computed(() => props.useActions)
           'group flex items-start gap-3 rounded-md border bg-card p-3 text-left outline-none transition-colors duration-[var(--dur)] ease-[var(--ease)] hover:border-foreground/20 hover:bg-accent/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary',
           isActive(ua) && 'border-primary/60 ring-1 ring-primary/40'
         )"
-        @click="$emit('focus', ua.turnRange)"
+        @click="$emit('focus', ua.entryRange)"
       >
         <span
           :class="cn(
@@ -79,7 +82,7 @@ const sorted = computed(() => props.useActions)
           <div class="flex items-center gap-2">
             <span class="text-sm font-semibold">{{ kindMeta[ua.recommendedAction].label }}</span>
             <span class="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-muted-foreground">
-              turns {{ ua.turnRange[0] }}&ndash;{{ ua.turnRange[1] }}
+              entries {{ ua.entryRange[0] }}&ndash;{{ ua.entryRange[1] }}
             </span>
           </div>
           <p class="text-sm leading-snug text-muted-foreground">

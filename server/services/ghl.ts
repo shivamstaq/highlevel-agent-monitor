@@ -1,52 +1,67 @@
+// BORROWED (mirrors GHL)
 /**
- * PIT-authenticated GoHighLevel REST client for the Voice AI dashboard.
+ * PIT-authenticated GoHighLevel Voice AI REST client + mappers (M2 sync layer).
  *
- * Auth: Private Integration Token (PIT) as a Bearer token, plus the required
- * `Version` header. See https://highlevel.stoplight.io — the Voice AI call-log
- * endpoints live under `/voice-ai/dashboard/call-logs`. Field names below are
- * best-effort: the exact GHL response shape should be verified in-sandbox, so
- * the mappers are deliberately defensive about alternative key names.
+ * This is a READ-ONLY mirror of the live HighLevel API, verified end-to-end
+ * against a real sandbox (see platform.md + docs/captures/). Auth is a Private
+ * Integration Token (Bearer) plus the required `Version: v3` header.
+ *
+ * Endpoints (platform.md §3):
+ *   GET /voice-ai/agents                          -> { agents[], … }
+ *   GET /voice-ai/agents/:id                      -> full agent config
+ *   GET /agent-studio/agents/versions/:versionId  -> { success, message, version }
+ *   GET /voice-ai/dashboard/call-logs             -> { callLogs[], totalRecords, traceId }
+ *
+ * Mappers project the RAW GHL shapes (shared/ghl.ts) into the normalized domain
+ * the eval layer consumes:
+ *   mapFlowVersion : GhlFlowVersionRaw     -> FlowGraph (Vue-Flow-shaped; uiNodes -> position)
+ *   mapCallLog     : GhlCallLog            -> { call: Call, transcript: Transcript }
+ *                    transcriptWithToolCalls -> TranscriptEntry[] (agent->agent, user->customer,
+ *                    action_executed->action), with REAL per-turn latency computed from times.
+ *
+ * Every field here traces to a captured payload; nothing is invented. The flat
+ * `transcript` string is used ONLY as a fallback when transcriptWithToolCalls is
+ * empty (platform.md §4 — it is lossy: irregular spacing, template artifacts,
+ * non-alternating turns).
  */
-import type { Call, Transcript, Turn, Speaker } from '#shared/types'
-import { CallSchema, TranscriptSchema } from '#shared/types'
-import type { TranscriptionSentence } from './timeline'
+import type {
+  Agent,
+  GhlAgent,
+  GhlCallLog,
+  GhlFlowVersionRaw,
+  GhlRawNode,
+  GhlRawEdge,
+  GhlUiNode,
+  FlowGraph,
+  FlowNode,
+  FlowNodeType,
+  FlowEdge,
+  FlowTransition,
+  Call,
+  Transcript,
+  TranscriptEntry,
+  PerTurnLatency,
+  CallType
+} from '#shared/types'
+import {
+  GhlAgentSchema,
+  GhlCallLogsResponseSchema,
+  GhlFlowVersionResponseSchema,
+  FlowGraphSchema,
+  CallSchema,
+  TranscriptSchema
+} from '#shared/types'
 
-const GHL_API_VERSION = '2021-07-28'
+/** ⚠️ platform.md §2: the Voice AI APIs want `Version: v3` (not 2021-07-28). */
+const GHL_API_VERSION = 'v3'
 
 export interface GhlClientConfig {
   apiBase: string
   pitToken: string
-}
-
-/** Loose shape of a GHL Voice AI call-log record (keys vary across versions). */
-export interface GhlCallLog {
-  id?: string
-  callId?: string
-  _id?: string
-  locationId?: string
-  agentId?: string
-  assistantId?: string
-  aiAgentId?: string
-  direction?: string
-  callDirection?: string
-  duration?: number
-  durationSec?: number
-  callDuration?: number
-  outcome?: string
-  status?: string
-  disposition?: string
-  recordingUrl?: string
-  recording?: string
-  contactName?: string
-  contact?: { name?: string, fullName?: string, firstName?: string, lastName?: string }
-  startedAt?: string
-  startTime?: string
-  createdAt?: string
-  dateAdded?: string
-  transcript?: unknown
-  messages?: unknown
-  transcription?: unknown
-  [k: string]: unknown
+  /** Sub-account location id — REQUIRED as a query param on agent/flow reads
+   * (the live API returns 400 "LocationId is missing in query" without it,
+   * even with a location-scoped PIT). */
+  locationId: string
 }
 
 function authHeaders(cfg: GhlClientConfig): Record<string, string> {
@@ -58,11 +73,15 @@ function authHeaders(cfg: GhlClientConfig): Record<string, string> {
 }
 
 /**
- * Thin fetch wrapper. Throws on non-2xx so callers (sync route) can collect the
+ * Thin fetch wrapper. Throws on non-2xx so callers (sync routes) can collect the
  * error string; never swallows here so the failure is visible upstream.
  */
-async function ghlFetch<T>(cfg: GhlClientConfig, path: string, query?: Record<string, string | number | undefined>): Promise<T> {
-  const url = new URL(path, cfg.apiBase.replace(/\/$/, '') + '/')
+async function ghlFetch<T>(
+  cfg: GhlClientConfig,
+  path: string,
+  query?: Record<string, string | number | boolean | undefined>
+): Promise<T> {
+  const url = new URL(path.replace(/^\//, ''), cfg.apiBase.replace(/\/$/, '') + '/')
   if (query) {
     for (const [k, v] of Object.entries(query)) {
       if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v))
@@ -71,232 +90,422 @@ async function ghlFetch<T>(cfg: GhlClientConfig, path: string, query?: Record<st
   const res = await fetch(url.toString(), { headers: authHeaders(cfg) })
   if (!res.ok) {
     const body = await res.text().catch(() => '')
-    throw new Error(`GHL ${res.status} ${res.statusText} for ${path}${body ? `: ${body.slice(0, 300)}` : ''}`)
+    throw new Error(
+      `GHL ${res.status} ${res.statusText} for ${path}${body ? `: ${body.slice(0, 300)}` : ''}`
+    )
   }
   return res.json() as Promise<T>
 }
 
 export function createGhlClient(cfg: GhlClientConfig) {
   return {
-    /** List Voice AI call logs for a location. */
-    async listCallLogs(locationId: string, params?: { limit?: number, startAfter?: string }): Promise<GhlCallLog[]> {
-      const data = await ghlFetch<unknown>(cfg, 'voice-ai/dashboard/call-logs', {
-        locationId,
-        limit: params?.limit,
-        startAfter: params?.startAfter
-      })
-      return extractCallLogArray(data)
+    /**
+     * List Voice AI agents for the configured location. Resilient: each agent is
+     * validated INDIVIDUALLY, so one malformed/draft agent (e.g. missing fields)
+     * no longer fails the whole list — the valid agents still sync. (The strict
+     * whole-array parse previously made a single draft agent return zero agents.)
+     */
+    async listAgents(): Promise<GhlAgent[]> {
+      const data = await ghlFetch<unknown>(cfg, 'voice-ai/agents', { locationId: cfg.locationId })
+      const obj = (data && typeof data === 'object' ? (data as Record<string, unknown>) : {})
+      const list = Array.isArray(obj.agents) ? obj.agents : []
+      const agents: GhlAgent[] = []
+      for (const item of list) {
+        const parsed = GhlAgentSchema.safeParse(item)
+        if (parsed.success) agents.push(parsed.data)
+        else {
+          const id = (item as { id?: string })?.id ?? 'unknown'
+          console.warn(`[ghl.listAgents] skipping unparseable agent ${id}: ${parsed.error.message}`)
+        }
+      }
+      return agents
     },
 
-    /** Fetch a single call log (with full transcript) by id. */
-    async getCallLog(locationId: string, callId: string): Promise<GhlCallLog | null> {
-      const data = await ghlFetch<unknown>(cfg, `voice-ai/dashboard/call-logs/${encodeURIComponent(callId)}`, { locationId })
-      if (data && typeof data === 'object') {
-        const obj = data as Record<string, unknown>
-        const single = (obj.callLog ?? obj.call ?? obj.data ?? obj) as GhlCallLog
-        return single ?? null
-      }
-      return null
+    /** Fetch a single agent's full config by id (resolves call.agentId). */
+    async getAgent(id: string): Promise<GhlAgent> {
+      const data = await ghlFetch<unknown>(cfg, `voice-ai/agents/${encodeURIComponent(id)}`, { locationId: cfg.locationId })
+      // The detail endpoint may return the agent bare or wrapped — unwrap both.
+      const obj = (data && typeof data === 'object' ? (data as Record<string, unknown>) : {}) as Record<string, unknown>
+      const raw = (obj.agent ?? obj.data ?? obj) as unknown
+      return GhlAgentSchema.parse(raw)
     },
 
     /**
-     * Fetch the per-sentence recording transcription for a message. This is the
-     * ONE HighLevel source of REAL turn timing (startTime/endTime in ms) and ASR
-     * confidence, used to build an `ingested` timeline (vs the modeled default).
-     * Endpoint: GET /conversations/locations/:locationId/messages/:messageId/transcription
+     * Fetch the Agent Studio flow version (the design DAG) for an `llmVersionId`,
+     * normalized to our Vue-Flow-shaped FlowGraph.
+     * GET /agent-studio/agents/versions/:versionId -> { success, message, version }
      */
-    async getMessageTranscription(locationId: string, messageId: string): Promise<TranscriptionSentence[]> {
+    async getFlowVersion(versionId: string): Promise<FlowGraph> {
       const data = await ghlFetch<unknown>(
         cfg,
-        `conversations/locations/${encodeURIComponent(locationId)}/messages/${encodeURIComponent(messageId)}/transcription`
+        `agent-studio/agents/versions/${encodeURIComponent(versionId)}`,
+        { locationId: cfg.locationId }
       )
-      return mapTranscription(data)
+      const parsed = GhlFlowVersionResponseSchema.parse(data)
+      return mapFlowVersion(parsed.version)
+    },
+
+    /**
+     * List Voice AI call logs for a location. Ingest from this LIST endpoint —
+     * it carries the full `transcriptWithToolCalls` (the detail endpoint drops
+     * it). Returns the de-enveloped, schema-validated logs.
+     *
+     * ⚠️ Cloudflare bound: the deployment runs on Workers (≈30s CPU budget,
+     * 1000-subrequest ceiling). Each list page is one subrequest, and downstream
+     * each ingested call can fan out to several Claude calls in the analysis
+     * pass. The DEFAULT `maxPages` is therefore a conservative 4 (≤200 calls per
+     * sync); a full backfill must opt in by passing a larger `opts.maxPages`.
+     *
+     * `callType` is parameterized (default `'TRIAL'` — the sandbox is trial-only)
+     * so a production location can ingest `'LIVE'` (or pass `undefined` to omit
+     * the filter and get whatever the API returns) without editing this client.
+     *
+     * `onPage` (optional, may be async) is invoked with each page's NEW
+     * (not-yet-seen-in-THIS-run) logs as they arrive, BEFORE the next page is
+     * fetched; resolving to `false` stops pagination early. Callers ingest in
+     * the callback and signal "stop, whole page already ingested-and-unchanged"
+     * for incremental sync that doesn't re-walk history every time.
+     */
+    async listCallLogs(
+      locationId: string,
+      opts?: {
+        pageSize?: number
+        maxPages?: number
+        agentId?: string
+        callType?: CallType | undefined
+        onPage?: (newLogs: GhlCallLog[], page: number) => boolean | void | Promise<boolean | void>
+      }
+    ): Promise<GhlCallLog[]> {
+      const pageSize = Math.min(Math.max(opts?.pageSize ?? 50, 1), 50) // GHL caps at 50
+      // Conservative default to stay within the Cloudflare subrequest/CPU
+      // budget; an explicit override (manual backfill) raises the ceiling.
+      const maxPages = Math.max(opts?.maxPages ?? 4, 1)
+      // `callType` defaults to TRIAL; pass null/undefined explicitly to omit.
+      const callType = opts && 'callType' in opts ? opts.callType : 'TRIAL'
+      const all: GhlCallLog[] = []
+      const seen = new Set<string>()
+
+      for (let page = 1; page <= maxPages; page++) {
+        const data = await ghlFetch<unknown>(cfg, 'voice-ai/dashboard/call-logs', {
+          locationId,
+          page,
+          pageSize,
+          callType,
+          agentId: opts?.agentId
+        })
+        const { callLogs } = GhlCallLogsResponseSchema.parse(data)
+        if (callLogs.length === 0) break
+        const newLogs: GhlCallLog[] = []
+        for (const log of callLogs) {
+          if (seen.has(log.id)) continue
+          seen.add(log.id)
+          all.push(log)
+          newLogs.push(log)
+        }
+        if (opts?.onPage) {
+          const cont = await opts.onPage(newLogs, page)
+          if (cont === false) break // caller signalled "stop, page fully seen"
+        }
+        if (callLogs.length < pageSize) break // last page
+      }
+      return all
     }
   }
 }
 
-/** Map HighLevel's per-sentence transcription payload into timeline input. */
-export function mapTranscription(data: unknown): TranscriptionSentence[] {
-  const arr = Array.isArray(data)
-    ? data
-    : (data && typeof data === 'object'
-        ? (((data as Record<string, unknown>).transcriptions
-          ?? (data as Record<string, unknown>).sentences
-          ?? (data as Record<string, unknown>).data) as unknown[] | undefined) ?? []
-        : [])
-  const out: TranscriptionSentence[] = []
-  for (const entry of arr) {
-    if (!entry || typeof entry !== 'object') continue
-    const o = entry as Record<string, unknown>
-    const start = Number(o.startTime ?? o.start ?? o.startMs ?? o.startTimeMs)
-    const end = Number(o.endTime ?? o.end ?? o.endMs ?? o.endTimeMs)
-    if (!Number.isFinite(start) || !Number.isFinite(end)) continue
-    const channel = Number(o.mediaChannel ?? o.channel ?? 0) || 0
-    const confidenceRaw = Number(o.confidence)
-    out.push({
-      startTimeMs: start,
-      endTimeMs: end,
-      channel,
-      text: String(o.transcript ?? o.text ?? ''),
-      ...(Number.isFinite(confidenceRaw) ? { confidence: confidenceRaw } : {})
-    })
+/**
+ * Fetch + map a single GHL agent into our enriched domain `Agent` (borrowed
+ * config + normalized flow graph), WITHOUT success criteria — that derivation is
+ * the eval layer's concern and is enriched separately by the agents/sync route.
+ *
+ * Shared by `/api/agents/sync` (bulk mirror) and `/api/sync`'s auto-sync
+ * fallback (when a call references an agent that was never synced), so the
+ * agent-build logic lives in exactly one place. Throws on a missing
+ * `llmVersionId` or any fetch/mapping failure so callers surface it loudly.
+ */
+export async function buildAgentFromGhl(
+  client: GhlClient,
+  ghl: GhlAgent,
+  syncedAt: string
+): Promise<Agent> {
+  let flow: FlowGraph
+  if (ghl.llmVersionId) {
+    flow = await client.getFlowVersion(ghl.llmVersionId)
+    // The flow version's agentId is the Agent Studio agent id, not the voice agent
+    // id — stamp our join key (call.agentId == GhlAgent.id) onto it.
+    flow.agentId = ghl.id
+  } else {
+    // No published Agent-Studio flow version yet (a freshly-created / draft agent).
+    // Mirror it anyway with an empty borrowed flow — the intended-flow + drift
+    // analysis is derived from the agent's PROMPT, not this graph, so the agent is
+    // still fully analyzable. The graph backfills once it's published in GHL.
+    flow = { versionId: '', agentId: ghl.id, isPublished: false, nodes: [], edges: [], globalVariables: [] }
   }
-  return out
+  return {
+    ghl,
+    flow,
+    successCriteria: [],
+    syncedAt
+  }
 }
 
 export type GhlClient = ReturnType<typeof createGhlClient>
 
-/** Pull the call-log array out of whatever envelope GHL wraps it in. */
-export function extractCallLogArray(data: unknown): GhlCallLog[] {
-  if (Array.isArray(data)) return data as GhlCallLog[]
-  if (data && typeof data === 'object') {
-    const obj = data as Record<string, unknown>
-    for (const key of ['callLogs', 'calls', 'data', 'logs', 'items', 'records']) {
-      const v = obj[key]
-      if (Array.isArray(v)) return v as GhlCallLog[]
-    }
+/* ============================================================================
+ * Flow-version mapper: GhlFlowVersionRaw -> normalized FlowGraph.
+ *
+ * Collapses GHL's richer node vocabulary into the five canonical types and
+ * pulls geometry from uiNodes (falling back to a deterministic layout when a
+ * logical node has no uiNode entry — observed: router/action nodes lacked one
+ * in 40-flow-version.json). Edges carry label + a stringified condition.
+ * ========================================================================== */
+
+/** Resolve a raw node's GHL type vocabulary down to our 5 FlowNodeType values. */
+export function resolveNodeType(node: GhlRawNode): FlowNodeType {
+  const fe = (node.frontendNodeType ?? '').toLowerCase()
+  const nt = (node.nodeType ?? '').toLowerCase()
+  const name = (node.nodeName ?? '').toLowerCase()
+
+  // endCall first — distinguishable by nodeType or name even though GHL marks
+  // many leaf nodes isEndNode=true.
+  if (nt === 'endcallnode' || fe === 'end-call' || name.includes('end_call') || name.includes('endcall')) {
+    return 'endCall'
   }
-  return []
+  if (fe === 'start-action' || nt === 'triggernode' || node.isStartNode) return 'trigger'
+  if (fe === 'llm' || nt === 'llmnode') return 'llm'
+  if (fe === 'ai-router' || nt === 'routernode' || name.includes('router')) return 'router'
+  if (fe === 'actions' || nt === 'actionnode' || name.startsWith('action')) return 'action'
+  // universalNode with an unknown subtype → infer from nodeConfig.type.
+  const cfgType = String((node.nodeConfig as Record<string, unknown>)?.type ?? '').toLowerCase()
+  if (cfgType === 'ai-router' || cfgType === 'router') return 'router'
+  if (cfgType === 'actions') return 'action'
+  // Safe default: treat an unrecognized node as an llm step (the dominant kind).
+  return 'llm'
 }
 
-/* ----------------------------------------------------------------------------
- * Mappers: GHL call-log -> our domain types. Defensive about field names.
- * ------------------------------------------------------------------------- */
-
-function pickCallId(log: GhlCallLog): string {
-  return String(log.id ?? log.callId ?? log._id ?? '').trim()
+/** Stringify a raw edge's machine condition block (e.g. `tool_name EQ router`). */
+function stringifyCondition(edge: GhlRawEdge): string | undefined {
+  const c = edge.conditions
+  if (!c || !Array.isArray(c.rules) || c.rules.length === 0) return undefined
+  const parts = c.rules.map(r => `${r.operand} ${r.operator} ${String(r.value)}`)
+  return parts.join(` ${c.type ?? 'AND'} `)
 }
 
-function pickDirection(log: GhlCallLog): 'inbound' | 'outbound' {
-  const raw = String(log.direction ?? log.callDirection ?? '').toLowerCase()
-  return raw === 'outbound' || raw === 'outgoing' ? 'outbound' : 'inbound'
-}
-
-function pickDuration(log: GhlCallLog): number {
-  const raw = log.durationSec ?? log.duration ?? log.callDuration ?? 0
-  const n = Number(raw)
-  return Number.isFinite(n) && n >= 0 ? n : 0
-}
-
-function pickContactName(log: GhlCallLog): string | undefined {
-  if (log.contactName) return String(log.contactName)
-  const c = log.contact
-  if (c) {
-    if (c.fullName) return c.fullName
-    if (c.name) return c.name
-    const joined = [c.firstName, c.lastName].filter(Boolean).join(' ').trim()
-    if (joined) return joined
+/** Best-effort string-array of tool ids attached to an llm/action node. */
+function pickTools(node: GhlRawNode): string[] | undefined {
+  const tools = (node.nodeConfig as Record<string, unknown>)?.tools
+  if (Array.isArray(tools)) {
+    const out = tools.map(String).filter(Boolean)
+    return out.length > 0 ? out : undefined
   }
   return undefined
 }
 
-function pickStartedAt(log: GhlCallLog): string {
-  const raw = log.startedAt ?? log.startTime ?? log.createdAt ?? log.dateAdded
-  if (raw) {
-    const d = new Date(String(raw))
-    if (!Number.isNaN(d.getTime())) return d.toISOString()
-  }
-  return new Date().toISOString()
+/** Pull an llm node's system prompt from nodeConfig. */
+function pickPrompt(node: GhlRawNode): string | undefined {
+  const p = (node.nodeConfig as Record<string, unknown>)?.prompt
+  return typeof p === 'string' && p.length > 0 ? p : undefined
 }
 
 /**
- * Map a GHL Voice AI call-log into our `Call`. `agentId` is required by the
- * schema; we fall back to a synthetic-but-stable id when GHL omits it so the
- * call still groups under one agent in the dashboard.
+ * Map raw flow version → FlowGraph. `uiNodes[].position` drives layout; nodes
+ * absent from uiNodes (real gap in the capture) get a deterministic fallback
+ * grid so the DAG still renders without overlap.
  */
-export function mapCallLogToCall(log: GhlCallLog, source: 'webhook' | 'poll' = 'poll'): Call {
-  const id = pickCallId(log) || `ghl-${pickStartedAt(log)}`
-  const agentId = String(log.agentId ?? log.assistantId ?? log.aiAgentId ?? 'ghl-voice-ai').trim() || 'ghl-voice-ai'
-  const outcome = log.outcome ?? log.disposition ?? log.status
-  const recordingUrl = (log.recordingUrl ?? log.recording) as string | undefined
+export function mapFlowVersion(raw: GhlFlowVersionRaw): FlowGraph {
+  const uiById = new Map<string, GhlUiNode>()
+  for (const u of raw.uiNodes) uiById.set(u.id, u)
 
-  return CallSchema.parse({
-    id,
-    agentId,
-    direction: pickDirection(log),
-    durationSec: pickDuration(log),
-    outcome: outcome ? String(outcome) : undefined,
-    recordingUrl: recordingUrl ? String(recordingUrl) : undefined,
-    contactName: pickContactName(log),
-    startedAt: pickStartedAt(log),
-    source
+  // Outgoing edges per source node → drive each node's `transitions`.
+  const outgoing = new Map<string, GhlRawEdge[]>()
+  for (const e of raw.edges) {
+    const arr = outgoing.get(e.source) ?? []
+    arr.push(e)
+    outgoing.set(e.source, arr)
+  }
+
+  let fallbackIdx = 0
+  const nodes: FlowNode[] = raw.nodes.map((n) => {
+    const ui = uiById.get(n.nodeId)
+    // uiNode carries `position`; fall back to computedPosition, then a grid slot.
+    const uiPos = ui?.position as { x?: number, y?: number } | undefined
+    const computed = (ui as Record<string, unknown> | undefined)?.computedPosition as
+      | { x?: number, y?: number }
+      | undefined
+    const position
+      = uiPos && typeof uiPos.x === 'number' && typeof uiPos.y === 'number'
+        ? { x: uiPos.x, y: uiPos.y }
+        : computed && typeof computed.x === 'number' && typeof computed.y === 'number'
+          ? { x: computed.x, y: computed.y }
+          : { x: 280 * (fallbackIdx % 3), y: 200 * Math.floor(fallbackIdx / 3) + 120 }
+    if (!ui) fallbackIdx++
+
+    const transitions: FlowTransition[] = (outgoing.get(n.nodeId) ?? []).map((e) => {
+      const cond = stringifyCondition(e)
+      const t: FlowTransition = { condition: e.label ?? cond ?? '' }
+      if (e.target) t.to = e.target
+      // surface the tool the branch is gated on, when the condition is tool_name EQ <x>.
+      const toolRule = e.conditions?.rules?.find(r => r.operand === 'tool_name')
+      if (toolRule && toolRule.value != null) t.toolName = String(toolRule.value)
+      return t
+    })
+
+    const node: FlowNode = {
+      id: n.nodeId,
+      type: resolveNodeType(n),
+      position,
+      data: {
+        displayName: n.nodeDisplayName || n.nodeName || n.nodeId,
+        isStart: Boolean(n.isStartNode),
+        isEnd: Boolean(n.isEndNode),
+        ...(pickPrompt(n) ? { prompt: pickPrompt(n) } : {}),
+        ...(pickTools(n) ? { tools: pickTools(n) } : {}),
+        ...(transitions.length > 0 ? { transitions } : {})
+      }
+    }
+    return node
+  })
+
+  const edges: FlowEdge[] = raw.edges.map((e) => {
+    const cond = stringifyCondition(e)
+    const edge: FlowEdge = { id: e.id, source: e.source, target: e.target }
+    if (e.label) edge.label = e.label
+    if (cond) edge.condition = cond
+    return edge
+  })
+
+  return FlowGraphSchema.parse({
+    versionId: raw.versionId,
+    agentId: raw.agentId ?? '',
+    isPublished: Boolean(raw.isPublished),
+    nodes,
+    edges,
+    ...(raw.viewport ? { viewport: raw.viewport } : {}),
+    globalVariables: raw.globalVariables ?? []
   })
 }
 
-/** Normalize the raw transcript field into a typed list of `Turn`s. */
-function normalizeTurns(raw: unknown): Turn[] {
-  if (raw == null) return []
+/* ============================================================================
+ * Call-log mapper: GhlCallLog -> { Call, Transcript } + per-turn latency.
+ * ========================================================================== */
 
-  // Case 1: a single string transcript ("Agent: hi\nCustomer: hello").
-  if (typeof raw === 'string') {
-    return parseStringTranscript(raw)
-  }
-
-  // Case 2: an array of turn-like objects.
-  if (Array.isArray(raw)) {
-    const turns: Turn[] = []
-    raw.forEach((entry, i) => {
-      const t = coerceTurn(entry, turns.length)
-      if (t) turns.push(t)
-      else if (typeof entry === 'string') {
-        const text = entry.trim()
-        if (text) turns.push({ idx: turns.length, speaker: i % 2 === 0 ? 'agent' : 'customer', text })
-      }
-    })
-    return turns
-  }
-
-  // Case 3: wrapped object, e.g. { messages: [...] } or { text: "..." }.
-  if (typeof raw === 'object') {
-    const obj = raw as Record<string, unknown>
-    for (const key of ['turns', 'messages', 'transcript', 'segments', 'utterances']) {
-      if (Array.isArray(obj[key])) return normalizeTurns(obj[key])
-    }
-    if (typeof obj.text === 'string') return parseStringTranscript(obj.text)
-  }
-  return []
+/** GHL turn role -> our normalized speaker (platform.md §10: agent=AI, user=caller). */
+function mapRole(role: 'agent' | 'user'): 'agent' | 'customer' {
+  return role === 'agent' ? 'agent' : 'customer'
 }
 
-function mapSpeaker(rawSpeaker: unknown): Speaker {
-  const s = String(rawSpeaker ?? '').toLowerCase()
-  if (['agent', 'assistant', 'ai', 'bot', 'system', 'voice_ai', 'voiceai'].includes(s)) return 'agent'
-  if (['customer', 'user', 'human', 'caller', 'contact', 'lead', 'prospect'].includes(s)) return 'customer'
-  // Unknown -> default to customer so the agent's own lines aren't over-counted.
-  return 'customer'
-}
-
-function coerceTurn(entry: unknown, idx: number): Turn | null {
-  if (!entry || typeof entry !== 'object') return null
-  const o = entry as Record<string, unknown>
-  const text = String(o.text ?? o.message ?? o.content ?? o.transcript ?? o.utterance ?? '').trim()
-  if (!text) return null
-  const speaker = mapSpeaker(o.role ?? o.speaker ?? o.source ?? o.from ?? o.party)
-  const tsRaw = o.tsSec ?? o.ts ?? o.start ?? o.startTime ?? o.timestamp
-  const tsNum = Number(tsRaw)
-  const tsSec = Number.isFinite(tsNum) && tsNum >= 0 ? tsNum : undefined
-  return { idx, speaker, text, ...(tsSec !== undefined ? { tsSec } : {}) }
-}
-
-/** Parse a flat string transcript into turns using "Speaker: text" line cues. */
-function parseStringTranscript(raw: string): Turn[] {
-  const lines = raw.split(/\r?\n+/).map(l => l.trim()).filter(Boolean)
-  const turns: Turn[] = []
-  for (const line of lines) {
-    const m = line.match(/^\s*([A-Za-z _-]{2,20})\s*:\s*(.+)$/)
-    if (m) {
-      turns.push({ idx: turns.length, speaker: mapSpeaker(m[1]), text: m[2]!.trim() })
+/**
+ * Project `transcriptWithToolCalls` into normalized TranscriptEntry[]. Times are
+ * GHL seconds (float); we keep seconds on the transcript (the eval layer reads
+ * startSec/endSec) and compute ms latency separately. Entry `idx` is the index
+ * into this array — the citation key used by findings/conformance.
+ */
+export function mapTranscriptEntries(log: GhlCallLog): TranscriptEntry[] {
+  const src = log.transcriptWithToolCalls ?? []
+  const entries: TranscriptEntry[] = []
+  src.forEach((e, idx) => {
+    if (e.role === 'action_executed') {
+      entries.push({
+        idx,
+        role: 'action',
+        toolName: e.toolName,
+        toolType: e.toolType,
+        toolCallId: e.toolCallId,
+        atSec: e.startTime
+      })
     } else {
-      // No speaker prefix — alternate, starting with the agent.
-      turns.push({ idx: turns.length, speaker: turns.length % 2 === 0 ? 'agent' : 'customer', text: line })
+      entries.push({
+        idx,
+        role: mapRole(e.role),
+        content: e.content,
+        startSec: e.startTime,
+        endSec: e.endTime
+      })
     }
-  }
-  return turns
+  })
+  return entries
 }
 
-/** Map a GHL call-log's transcript payload into our `Transcript`. */
-export function mapCallLogToTranscript(log: GhlCallLog): Transcript {
-  const id = pickCallId(log) || `ghl-${pickStartedAt(log)}`
-  const rawTranscript = log.transcript ?? log.messages ?? log.transcription
-  const turns = normalizeTurns(rawTranscript)
-  return TranscriptSchema.parse({ callId: id, turns })
+/**
+ * REAL per-turn response latency: for each agent turn, the gap from the
+ * immediately-preceding customer turn's `endSec` to this agent turn's `startSec`
+ * (platform.md §8 — measured 1086–1812 ms on Call A). Negative gaps (barge-in /
+ * overlap) are clamped to 0 but still counted as a turn.
+ */
+export function computePerTurnLatency(entries: TranscriptEntry[]): PerTurnLatency[] {
+  const out: PerTurnLatency[] = []
+  for (let i = 0; i < entries.length; i++) {
+    const cur = entries[i]
+    if (!cur || cur.role !== 'agent') continue
+    // walk back to the nearest customer turn.
+    let prevCustomerIdx = -1
+    for (let j = i - 1; j >= 0; j--) {
+      const p = entries[j]
+      if (p && p.role === 'customer') {
+        prevCustomerIdx = j
+        break
+      }
+      if (p && p.role === 'agent') break // a prior agent turn → not a response gap
+    }
+    if (prevCustomerIdx < 0) continue
+    const prev = entries[prevCustomerIdx]
+    if (!prev || prev.role !== 'customer' || cur.role !== 'agent') continue
+    const latencyMs = Math.max(0, Math.round((cur.startSec - prev.endSec) * 1000))
+    out.push({ agentEntryIdx: cur.idx, customerEntryIdx: prev.idx, latencyMs })
+  }
+  return out
+}
+
+/** Fallback parser for the lossy flat `transcript` string (bot:/human: prefixes). */
+function parseFlatTranscript(raw: string): TranscriptEntry[] {
+  const lines = raw.split(/\r?\n+/).map(l => l.trim()).filter(Boolean)
+  const entries: TranscriptEntry[] = []
+  lines.forEach((line) => {
+    const m = line.match(/^(bot|agent|assistant|human|user|customer|caller)\s*:\s*(.*)$/i)
+    const idx = entries.length
+    if (m) {
+      const tag = m[1]!.toLowerCase()
+      const role: 'agent' | 'customer' = ['bot', 'agent', 'assistant'].includes(tag) ? 'agent' : 'customer'
+      entries.push({ idx, role, content: m[2]!.trim(), startSec: 0, endSec: 0 })
+    } else {
+      // no prefix — alternate, agent first.
+      entries.push({ idx, role: idx % 2 === 0 ? 'agent' : 'customer', content: line, startSec: 0, endSec: 0 })
+    }
+  })
+  return entries
+}
+
+/**
+ * Map a GHL call-log LIST item into our `{ call, transcript }`. Prefers
+ * `transcriptWithToolCalls`; falls back to the flat `transcript` string only
+ * when the structured array is empty.
+ */
+export function mapCallLog(
+  log: GhlCallLog,
+  source: 'poll' | 'webhook' | 'seed' = 'poll'
+): { call: Call, transcript: Transcript } {
+  const callType: CallType = log.trialCall ? 'TRIAL' : 'LIVE'
+  const createdAt = (() => {
+    const d = new Date(log.createdAt)
+    return Number.isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString()
+  })()
+
+  const call = CallSchema.parse({
+    id: log.id,
+    agentId: log.agentId,
+    ...(log.contactId ? { contactId: log.contactId } : {}),
+    createdAt,
+    durationSec: Math.max(0, Number(log.duration) || 0),
+    callType,
+    source,
+    ...(log.summary ? { summary: log.summary } : {})
+  })
+
+  let entries = mapTranscriptEntries(log)
+  if (entries.length === 0 && typeof log.transcript === 'string' && log.transcript.trim()) {
+    entries = parseFlatTranscript(log.transcript)
+  }
+  const transcript = TranscriptSchema.parse({ callId: log.id, entries })
+
+  return { call, transcript }
 }

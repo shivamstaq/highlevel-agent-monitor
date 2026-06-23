@@ -1,4 +1,5 @@
 <script setup lang="ts">
+// CREATED (our eval layer) — the shared agent roster table over the flat AgentHealth contract.
 import type { AgentHealth } from '#shared/types'
 import { computed, ref } from 'vue'
 import { ArrowDown, ArrowDownUp, ArrowUp, ChevronRight } from 'lucide-vue-next'
@@ -20,6 +21,9 @@ import { cn } from '~/lib/utils'
  * ~48px comfortable rows, full-row NuxtLink drill-down (keyboard reachable),
  * sortable headers with aria-sort + directional arrows, status bars/badges
  * routed through useTone (no raw emerald-/amber-/red-NNN utilities).
+ *
+ * Bound to the rebuilt FLAT AgentHealth contract: agentId / agentName (no nested
+ * `agent` object, no `goal`). "Flow adherence" = mean conformance (avgFlowAdherence).
  */
 const props = defineProps<{
   agents: AgentHealth[]
@@ -27,7 +31,7 @@ const props = defineProps<{
 
 const { scoreToneSet, scoreToneName, scoreBandLabel, toneClasses } = useTone()
 
-type SortKey = 'name' | 'avgScore' | 'avgConformance' | 'failureRate' | 'openUseActions'
+type SortKey = 'name' | 'avgScore' | 'avgFlowAdherence' | 'failureRate' | 'openUseActions'
 const sortKey = ref<SortKey>('avgScore')
 const sortAsc = ref(false)
 
@@ -52,12 +56,12 @@ const rows = computed(() => {
     let av: number | string
     let bv: number | string
     if (sortKey.value === 'name') {
-      av = a.agent.name.toLowerCase()
-      bv = b.agent.name.toLowerCase()
-    } else if (sortKey.value === 'avgConformance') {
+      av = a.agentName.toLowerCase()
+      bv = b.agentName.toLowerCase()
+    } else if (sortKey.value === 'avgFlowAdherence') {
       // null Flow adherence (no flow baseline) sorts below any real value.
-      av = a.avgConformance ?? -1
-      bv = b.avgConformance ?? -1
+      av = a.avgFlowAdherence ?? -1
+      bv = b.avgFlowAdherence ?? -1
     } else {
       av = a[sortKey.value]
       bv = b[sortKey.value]
@@ -76,6 +80,15 @@ function initials(name: string): string {
 function failureClass(rate: number): string {
   return rate > 0 ? toneClasses('danger').text : 'text-muted-foreground'
 }
+
+/** Compact secondary line under the agent name (no `goal` in the flat contract). */
+function subtitle(a: AgentHealth): string {
+  if (!a.callsAnalyzed) return 'No calls analyzed yet'
+  const calls = `${a.callsAnalyzed} call${a.callsAnalyzed === 1 ? '' : 's'} analyzed`
+  return a.criteriaMetRate != null
+    ? `${calls} · ${Math.round(a.criteriaMetRate * 100)}% criteria met`
+    : calls
+}
 </script>
 
 <template>
@@ -92,20 +105,20 @@ function failureClass(rate: number): string {
     >
       <li
         v-for="row in rows"
-        :key="row.agent.id"
+        :key="row.agentId"
       >
         <NuxtLink
-          :to="`/agents/${row.agent.id}`"
+          :to="`/agents/${row.agentId}`"
           class="flex items-center gap-3 px-4 py-3 focus-visible:outline-2 focus-visible:outline-primary -outline-offset-2 motion-safe:transition-colors active:bg-muted/50"
         >
           <Avatar class="size-9 shrink-0 rounded-full">
             <AvatarFallback class="rounded-full bg-primary/10 text-[12px] font-semibold text-primary">
-              {{ initials(row.agent.name) }}
+              {{ initials(row.agentName) }}
             </AvatarFallback>
           </Avatar>
           <div class="min-w-0 flex-1">
             <div class="flex items-baseline justify-between gap-2">
-              <span class="truncate text-sm font-semibold">{{ row.agent.name }}</span>
+              <span class="truncate text-sm font-semibold">{{ row.agentName }}</span>
               <span
                 :class="cn('shrink-0 text-sm font-semibold tabular-nums', row.callsAnalyzed ? scoreToneSet(row.avgScore).text : 'text-muted-foreground')"
               >{{ row.callsAnalyzed ? Math.round(row.avgScore) : '—' }}</span>
@@ -121,9 +134,9 @@ function failureClass(rate: number): string {
               <span class="shrink-0">
                 Flow
                 <span
-                  v-if="row.avgConformance != null"
-                  :class="cn('font-medium tabular-nums', toneClasses(scoreToneName(row.avgConformance)).text)"
-                >{{ Math.round(row.avgConformance) }}</span>
+                  v-if="row.avgFlowAdherence != null"
+                  :class="cn('font-medium tabular-nums', toneClasses(scoreToneName(row.avgFlowAdherence)).text)"
+                >{{ Math.round(row.avgFlowAdherence) }}</span>
                 <span v-else>—</span>
               </span>
               <span aria-hidden="true">·</span>
@@ -212,20 +225,20 @@ function failureClass(rate: number): string {
             </button>
           </TableHead>
 
-          <TableHead :aria-sort="ariaSort('avgConformance')">
+          <TableHead :aria-sort="ariaSort('avgFlowAdherence')">
             <button
               type="button"
               class="flex items-center gap-1 rounded-md font-medium focus-visible:outline-2 focus-visible:outline-primary"
               :title="'Flow adherence: how closely each agent\'s calls followed their expected flow.'"
-              @click="toggleSort('avgConformance')"
+              @click="toggleSort('avgFlowAdherence')"
             >
               Flow adherence
               <ArrowUp
-                v-if="sortKey === 'avgConformance' && sortAsc"
+                v-if="sortKey === 'avgFlowAdherence' && sortAsc"
                 class="size-3 text-primary"
               />
               <ArrowDown
-                v-else-if="sortKey === 'avgConformance'"
+                v-else-if="sortKey === 'avgFlowAdherence'"
                 class="size-3 text-primary"
               />
               <ArrowDownUp
@@ -292,7 +305,7 @@ function failureClass(rate: number): string {
       <TableBody>
         <TableRow
           v-for="row in rows"
-          :key="row.agent.id"
+          :key="row.agentId"
           class="group relative h-12 cursor-pointer"
         >
           <TableCell>
@@ -303,25 +316,25 @@ function failureClass(rate: number): string {
               part of the activation target, not just the first cell.
             -->
             <NuxtLink
-              :to="`/agents/${row.agent.id}`"
-              :aria-label="`Open agent · ${row.agent.name}`"
+              :to="`/agents/${row.agentId}`"
+              :aria-label="`Open agent · ${row.agentName}`"
               class="absolute inset-0 z-0 rounded-md focus-visible:outline-2 focus-visible:outline-primary -outline-offset-2"
             />
             <div class="flex items-center gap-3">
               <Avatar class="size-9 shrink-0 rounded-full">
                 <AvatarFallback class="rounded-full bg-primary/10 text-[12px] font-semibold text-primary">
-                  {{ initials(row.agent.name) }}
+                  {{ initials(row.agentName) }}
                 </AvatarFallback>
               </Avatar>
               <div class="min-w-0">
                 <div class="truncate text-sm font-semibold">
-                  {{ row.agent.name }}
+                  {{ row.agentName }}
                 </div>
                 <div
                   class="truncate text-[12px] text-muted-foreground"
-                  :title="row.agent.goal"
+                  :title="subtitle(row)"
                 >
-                  {{ row.agent.goal }}
+                  {{ subtitle(row) }}
                 </div>
               </div>
             </div>
@@ -348,7 +361,7 @@ function failureClass(rate: number): string {
                 :aria-valuenow="row.callsAnalyzed ? Math.round(row.avgScore) : 0"
                 aria-valuemin="0"
                 aria-valuemax="100"
-                :aria-label="`Average score for ${row.agent.name}`"
+                :aria-label="`Average score for ${row.agentName}`"
               >
                 <div
                   v-if="row.callsAnalyzed"
@@ -368,29 +381,29 @@ function failureClass(rate: number): string {
 
           <TableCell>
             <div
-              v-if="row.avgConformance != null"
+              v-if="row.avgFlowAdherence != null"
               class="flex items-center gap-2"
             >
               <div
                 class="h-1.5 w-full overflow-hidden rounded-full"
-                :class="toneClasses(scoreToneName(row.avgConformance)).bg"
+                :class="toneClasses(scoreToneName(row.avgFlowAdherence)).bg"
                 role="progressbar"
-                :aria-valuenow="Math.round(row.avgConformance)"
+                :aria-valuenow="Math.round(row.avgFlowAdherence)"
                 aria-valuemin="0"
                 aria-valuemax="100"
-                :aria-label="`Flow adherence for ${row.agent.name}`"
+                :aria-label="`Flow adherence for ${row.agentName}`"
               >
                 <div
                   class="h-full rounded-full"
-                  :class="toneClasses(scoreToneName(row.avgConformance)).dot"
-                  :style="`width: ${Math.max(2, Math.round(row.avgConformance))}%`"
+                  :class="toneClasses(scoreToneName(row.avgFlowAdherence)).dot"
+                  :style="`width: ${Math.max(2, Math.round(row.avgFlowAdherence))}%`"
                 />
               </div>
               <span
                 class="w-9 shrink-0 text-right text-sm font-semibold tabular-nums"
-                :class="toneClasses(scoreToneName(row.avgConformance)).text"
+                :class="toneClasses(scoreToneName(row.avgFlowAdherence)).text"
               >
-                {{ Math.round(row.avgConformance) }}
+                {{ Math.round(row.avgFlowAdherence) }}
               </span>
             </div>
             <span

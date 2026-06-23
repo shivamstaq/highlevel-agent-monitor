@@ -34,9 +34,11 @@ What makes it more than a transcript scorer — two layers that model how voice 
         │                                                 │
         │   LLMProvider.complete<T>({ system, user,       │
         │                             schema, schemaName })│
-        │     • Ollama   (default — /api/chat, JSON schema)│
-        │     • Anthropic(drop-in — claude-opus-4-8)      │
-        │     • mock     (deterministic, no model)        │
+        │     • Anthropic(DEPLOYED — Claude; reasoner     │
+        │        claude-sonnet-4-6, labeler haiku-4-5)    │
+        │     • Ollama   (local — /api/chat, JSON schema) │
+        │     • mock     (deterministic fail-loud         │
+        │        fallback; opt-in only, never default)    │
         │                                                 │
         │   Output ─► AnalysisResultSchema (zod-validated)│
         │   findings · scorecard · recommendations ·      │
@@ -44,7 +46,8 @@ What makes it more than a transcript scorer — two layers that model how voice 
         └────────────────────────────────────────────────┘
                              │
                              ▼
-                 Storage (Nitro useStorage('data'), fs driver)
+         Storage (Nitro useStorage('data') — Cloudflare KV when
+              deployed, fs driver for local dev/node)
             agents: · calls: · transcripts: · analyses:
                              │
                              ▼
@@ -175,14 +178,18 @@ modeled) and the call view prefers it over the modeled one.
 pnpm install
 
 # 2. Pick an analysis engine
-#    Default is Ollama running locally. Make sure it's up and the model is pulled:
-ollama serve              # if not already running
-ollama pull qwen2.5:14b
-
-#    No GPU / want a zero-dependency run? Use the deterministic mock engine:
-#       cp .env.example .env   && set LLM_PROVIDER=mock
-#    Have a Claude key? Drop in Anthropic:
+#    DEPLOYED config (and recommended locally) is real Anthropic Claude:
+#       cp .env.example .env
 #       set LLM_PROVIDER=anthropic and ANTHROPIC_API_KEY=sk-ant-...
+#    Per-role models default to the cost-low floor in
+#    server/services/llm/config.ts (reasoner claude-sonnet-4-6,
+#    labeler claude-haiku-4-5).
+#
+#    Prefer a local model? Use Ollama:
+#       set LLM_PROVIDER=ollama, then: ollama serve && ollama pull qwen2.5:14b
+#    Zero-dependency, no-network run for tests/demo: the deterministic engine
+#       set LLM_PROVIDER=mock   (this is the ONLY way to reach mock — a real
+#       provider with a missing key now fails loud, never silently downgrades).
 
 # 3. Run the dev server
 pnpm dev                  # http://localhost:3000
@@ -225,8 +232,9 @@ data / api / llm / ui / ghl could be built independently. The LLM provider is a
 one-method interface (`complete<T>`) with three implementations, so Ollama,
 Claude, and a deterministic mock are interchangeable via one env var. zod
 validates model output at the boundary, so a malformed completion fails loudly
-instead of corrupting the dashboard. Scope cut: storage is the unstorage fs driver
-(no DB/native deps), suitable for a single-node deployment.
+instead of corrupting the dashboard. Storage is unstorage with no DB/native deps:
+Cloudflare KV (the `DATA` binding) on the deployed Worker, the fs driver locally —
+chosen at build time per target in `nuxt.config.ts`.
 
 **QA.** The deterministic **mock** provider doubles as a test oracle: the whole
 loop (seed → analyze → rollup → render) runs with no network and no model, so the
@@ -241,12 +249,12 @@ end-to-end test runner is shipped — verification is the documented smoke test
 
 | Capability | Status | Notes |
 | --- | --- | --- |
-| Webhook ingestion transport | **Functional** | `POST /api/webhooks/ghl` upserts call+transcript and triggers analysis. |
+| Webhook ingestion transport | **Functional** | `POST /api/webhooks/ghl` upserts call+transcript and triggers analysis. Signature verification is **fail-closed**: Ed25519 (`X-GHL-Signature`) against GHL's public key, legacy RSA (`X-WH-Signature`) opt-in; unsigned Workflow pushes gated by a shared `?token=`. See `docs/ghl-integration.md` §3. |
 | PIT poll ingestion transport | **Functional** | `POST /api/sync` calls GHL `/voice-ai/dashboard/call-logs` with the Private Integration Token. |
-| LLM analysis engine | **Functional** | Pluggable Ollama / Anthropic / mock; zod-validated structured output. |
+| LLM analysis engine | **Functional** | Deployed on real Anthropic Claude (reasoner claude-sonnet-4-6, labeler claude-haiku-4-5); pluggable Ollama / mock; zod-validated structured output. A real provider with a missing key fails loud — mock is opt-in only. |
 | Expected-flow generation | **Functional** | Real LLM (cached by design hash); shown live on agent creation. |
 | Flow conformance / drift scoring | **Functional** | Deterministic alignment over LLM turn-labels; reproducible (mock is the oracle). |
-| Storage | **Functional** | Nitro `useStorage('data')`, unstorage fs driver. |
+| Storage | **Functional** | Nitro `useStorage('data')` — Cloudflare KV (`DATA` binding) when deployed, unstorage fs driver for local/node. |
 | Dashboard (fleet / agent / call) | **Functional** | shadcn-vue + @unovis charts, drill-down, transcript highlighting. |
 | Event-timeline **timing** | **Modeled** | HighLevel exposes no per-stage latency; modeled on cited LiveKit budgets, deterministic, labeled "Modeled timing". |
 | Real per-sentence timing ingestion | **Functional (code path)** | `ghl.ts#getMessageTranscription` + `timeline.ts#buildTimelineFromSentences`; produces an `ingested` timeline when a `messageId` is present. |
@@ -287,7 +295,7 @@ end-to-end test runner is shipped — verification is the documented smoke test
    **flow-drift rollup** ("Offer Retention skipped in 100% of calls") — the flywheel.
 7. **Close the loop (30s).** Show a **recommendation** with its paste-ready
    `suggestedChange`. Hit **Re-analyze**. Mention the provider is swappable
-   (Ollama → Claude → mock) via one env var.
+   (Claude → Ollama → mock) via one env var — the deploy runs real Claude.
 8. **Land it (15s).** “Raw logs in, ranked fixes out — Monitor and Analyze
    automated, grounded in the agent's designed flow and the realtime pipeline,
    embedded right inside HighLevel.”

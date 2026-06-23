@@ -1,20 +1,26 @@
 /**
  * GET /api/agents -> FleetStats
  *
- * Fleet-wide health rollup: aggregate every stored analysis into the headline
- * KPIs, the per-day trend, per-agent health, and the top fleet recommendations.
- * Tolerates empty storage (returns zeroed metrics and empty arrays).
+ * Fleet-wide health rollup: aggregate every analyzed call into the headline KPIs,
+ * the per-day trend, per-agent health, and the top fleet recommendations.
+ *
+ * HOT READ PATH: reads ONLY the three write-time index records via getItem
+ * (`index:agents`, `index:calls`, `index:fleet`) — ZERO getKeys/list*. On a fresh
+ * (empty) KV every index getter returns its empty map without listing, so this
+ * returns the zeroed FleetStats and never 500s.
  */
-import { listAgents, listAnalyses, listCalls } from '../../services/db'
-import { computeFleetStats } from '../../utils/rollup'
+import { getAgentsIndex, getCallsIndex, getFleetIndex } from '../../services/db'
+import { computeFleetStatsFromIndexes, FLEET_INDEX_VERSION } from '../../utils/rollup'
 import type { FleetStats } from '#shared/types'
 
 export default defineEventHandler(async (): Promise<FleetStats> => {
-  const [agents, calls, analyses] = await Promise.all([
-    listAgents(),
-    listCalls(),
-    listAnalyses()
+  const [agentsIndex, callsIndex, fleetIndex] = await Promise.all([
+    getAgentsIndex(),
+    getCallsIndex(),
+    getFleetIndex()
   ])
 
-  return computeFleetStats(agents, calls, analyses)
+  // getFleetIndex returns null on a miss; the empty fleet index is { summaries: {} }.
+  const fleet = fleetIndex ?? { version: FLEET_INDEX_VERSION, summaries: {} }
+  return computeFleetStatsFromIndexes(agentsIndex, callsIndex, fleet)
 })

@@ -1,17 +1,31 @@
 <script setup lang="ts">
-import type { FlowAlignment, FlowNodeKind, NodeStatus } from '#shared/types'
-import { computed, watchEffect } from 'vue'
-import { ArrowUpRight, CircleCheck, Info, Lightbulb, Target, Users } from 'lucide-vue-next'
+// CREATED — the agent overview: how the agent is DESIGNED to run, how it scores
+// across calls, and a link out to each call's drift analysis.
+/**
+ * /agents/:id — a single, tab-free agent overview:
+ *
+ *   • Header — identity + aggregate health (avg score / calls / failure / flow).
+ *   • Intended call flow — the agent's LLM-inferred happy-path flow (atomic
+ *     steps + the purpose/rules of each). NO per-call drift here; drift lives on
+ *     the call page. Clicking a step shows what it should accomplish.
+ *   • Overall analysis — aggregate per-criterion scorecard + recurring fixes.
+ *   • Call logs — a dense table; each row links to that call's drift analysis.
+ *
+ * The borrowed GHL Call-Flow / Build / Deploy surfaces were removed — they already
+ * exist on the HighLevel platform and added no eval value here.
+ */
+import { computed, onMounted, ref, watch, watchEffect } from 'vue'
+import { ArrowUpRight, Inbox, Lightbulb, Loader2, Route, Target } from 'lucide-vue-next'
+import type { CallListItem } from '#shared/types'
 import { Avatar, AvatarFallback } from '~/components/ui/avatar'
-import { Badge } from '~/components/ui/badge'
 import { Button } from '~/components/ui/button'
 import { Alert, AlertDescription, AlertTitle } from '~/components/ui/alert'
 import { Skeleton } from '~/components/ui/skeleton'
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '~/components/ui/tooltip'
 import SectionCard from '~/components/SectionCard.vue'
 import CallTable from '~/components/CallTable.vue'
 import RecommendationCard from '~/components/RecommendationCard.vue'
-import FlowDiagram from '~/components/FlowDiagram.vue'
+import IntendedFlowGraph from '~/components/IntendedFlowGraph.vue'
+import FlowNodeDetail from '~/components/FlowNodeDetail.vue'
 import { useApi } from '~/composables/useApi'
 import { useTone } from '~/composables/useTone'
 import { useBreadcrumb } from '~/composables/useBreadcrumb'
@@ -19,27 +33,31 @@ import { cn } from '~/lib/utils'
 
 const route = useRoute()
 const id = computed(() => route.params.id as string)
-const { getAgent, getAgentFlow } = useApi()
-const { scoreToneName, toneClasses } = useTone()
+const { getAgentDetail, inferAgentFlow } = useApi()
+const { scoreToneName, scoreTone, toneClasses } = useTone()
 const { setBreadcrumb } = useBreadcrumb()
 
-const { data, pending, error, refresh } = await useAsyncData(`agent-${id.value}`, () => getAgent(id.value))
-// Flow is generated lazily and may fail independently; don't let it block the page.
-const { data: flow } = await useAsyncData(`agent-flow-${id.value}`, () => getAgentFlow(id.value), {
-  default: () => null
-})
+const { data: detail, pending, error, refresh } = await useAsyncData(
+  () => `agent-${id.value}`,
+  () => getAgentDetail(id.value),
+  { watch: [id] }
+)
 
-const agent = computed(() => data.value?.health.agent)
-const health = computed(() => data.value?.health)
-const flowSummary = computed(() => data.value?.flowSummary)
-const recommendations = computed(() => data.value?.recommendations ?? [])
+const agent = computed(() => detail.value?.agent ?? null)
+const health = computed(() => detail.value?.health)
+const calls = computed<CallListItem[]>(() => detail.value?.calls ?? [])
+const recommendations = computed(() => detail.value?.recommendations ?? [])
+const inferredFlow = computed(() => detail.value?.inferredFlow ?? null)
+const criteriaScorecard = computed(() => detail.value?.criteriaScorecard ?? [])
+const hasFlow = computed(() => Boolean(inferredFlow.value?.nodes.length))
 
-useHead(() => ({ title: agent.value?.name ?? 'Agent' }))
+const agentName = computed(() => health.value?.agentName ?? 'Agent')
 
+useHead(() => ({ title: agentName.value }))
 watchEffect(() => {
   setBreadcrumb([
     { label: 'Agents', to: '/agents' },
-    { label: agent.value?.name ?? 'Agent' }
+    { label: agentName.value }
   ])
 })
 
@@ -47,92 +65,55 @@ function initials(name: string): string {
   return name.split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase()
 }
 
-/** Calls below the bar or carrying a finding — the agent's triage queue. */
-const failingCalls = computed(() =>
-  (data.value?.calls ?? [])
-    .filter(c => c.topSeverity || (c.score !== null && c.score < 70))
-    .sort((a, b) => (a.score ?? 100) - (b.score ?? 100))
-)
-const allCalls = computed(() => data.value?.calls ?? [])
-
-/**
- * Criteria-met ring (P01). Plots the TRUE criteria-met rate — the share of
- * success criteria the agent's analyzed calls actually met (health.criteriaMetRate,
- * 0–1) — NOT the weighted Call score. `null` (no analyzed calls) renders an empty
- * ring with an em-dash so we never imply 0% met where nothing was measured.
- */
-const hasCriteriaData = computed(() => (health.value?.criteriaMetRate ?? null) !== null)
-const criteriaMetPct = computed(() =>
-  hasCriteriaData.value ? Math.round((health.value!.criteriaMetRate as number) * 100) : 0
-)
-
-/**
- * Hand-rolled SSR-stable ring geometry (stroke-dasharray over a visible neutral
- * track) — the Unovis VisDonut rendered blank server-side and resolved its
- * remainder to an invisible near-white track (P01). r/circumference are fixed so
- * the teal arc subtends exactly criteriaMetPct/100 of the circle.
- */
-const RING = { size: 160, stroke: 14 }
-const ringRadius = (RING.size - RING.stroke) / 2
-const ringCircumference = 2 * Math.PI * ringRadius
-const ringDash = computed(() => (criteriaMetPct.value / 100) * ringCircumference)
-const criteriaTone = computed(() =>
-  hasCriteriaData.value ? toneClasses(scoreToneName(criteriaMetPct.value)).text : 'text-muted-foreground'
-)
-
-/**
- * Aggregate drift overlay for the Expected-call-flow diagram (P19): turn the
- * static design diagram into the agent's drift heatmap by feeding FlowDiagram a
- * synthetic FlowAlignment whose per-node status is the agent's WORST recurring
- * drift for that node (any skips -> skipped/warning, else any drift -> out_of_order,
- * else hit/success). driftScore carries the rate so the node tooltip reads true.
- */
-const aggregateAlignment = computed<FlowAlignment | null>(() => {
-  const fs = flowSummary.value
-  if (!agent.value || !fs || fs.callsScored === 0) return null
-  const nodeAlignments = fs.nodes.map((n) => {
-    const status: NodeStatus = n.skipRate > 0 ? 'skipped' : 'out_of_order'
-    const rate = n.skipRate > 0 ? n.skipRate : n.driftRate
-    return {
-      nodeId: n.nodeId,
-      label: n.label,
-      // Server guarantees a FlowNodeKind; the client FlowDriftSummary widens it to string.
-      kind: n.kind as FlowNodeKind,
-      status,
-      driftScore: Math.min(1, Math.max(0, rate)),
-      matchedTurnIdxs: [],
-      note: `${Math.round(rate * 100)}% of scored calls ${n.skipRate > 0 ? 'skipped' : 'drifted on'} this step`
-    }
-  })
-  return {
-    callId: '',
-    agentId: agent.value.id,
-    conformanceScore: fs.avgConformance ?? 0,
-    fitness: 0,
-    nodeAlignments,
-    actualPath: []
-  }
-})
+/** Selected node / edge in the intended-flow graph (drives the step-detail panel). */
+const selectedNodeId = ref<string | null>(null)
+const selectedEdge = ref<{ condition: string, from: string, to: string } | null>(null)
+function onSelectNode(nodeId: string) {
+  selectedNodeId.value = selectedNodeId.value === nodeId ? null : nodeId
+  selectedEdge.value = null
+}
+function onSelectEdge(payload: { condition: string, from: string, to: string }) {
+  selectedEdge.value = payload
+  selectedNodeId.value = null
+}
 
 const failureTone = computed(() =>
   (health.value?.failureRate ?? 0) > 0 ? toneClasses('danger').text : 'text-foreground'
 )
 
-/** Drift bar: skips read as warning, reordering/drift as danger — via tokens. */
-function driftRate(n: { skipRate: number, driftRate: number }): number {
-  return n.skipRate > 0 ? n.skipRate : n.driftRate
+/* ----------------------------------------------------------------------------
+ * Intended call flow is derived from the agent's PROMPT — it needs no calls. So
+ * we map it automatically as soon as the agent loads without one, and also expose
+ * a manual trigger (idempotent; cached per-agent after the first derive).
+ * ------------------------------------------------------------------------- */
+const mappingFlow = ref(false)
+const mapError = ref<string | null>(null)
+async function mapFlow() {
+  if (mappingFlow.value) return
+  mappingFlow.value = true
+  mapError.value = null
+  try {
+    await inferAgentFlow(id.value)
+    await refresh()
+  } catch (err: unknown) {
+    mapError.value = (err as { statusMessage?: string, message?: string })?.statusMessage
+      ?? (err as { message?: string })?.message
+      ?? 'Could not map the intended flow.'
+  } finally {
+    mappingFlow.value = false
+  }
 }
-function driftToneSet(n: { skipRate: number, driftRate: number }) {
-  return n.skipRate > 0 ? toneClasses('warning') : toneClasses('danger')
+/** Auto-map once when the agent has loaded but has no intended flow yet. */
+function maybeAutoMap() {
+  if (detail.value && !hasFlow.value && !mappingFlow.value && !mapError.value) void mapFlow()
 }
-function conformanceTone(score: number): string {
-  return toneClasses(scoreToneName(score)).text
-}
+onMounted(maybeAutoMap)
+watch([detail, hasFlow], maybeAutoMap)
 </script>
 
 <template>
-  <div class="mx-auto flex w-full max-w-[1400px] flex-col gap-6 p-4 md:p-6">
-    <!-- Error (transport / server) — distinct from a true not-found. -->
+  <div class="flex w-full flex-col gap-5 px-3 py-3 md:px-4 md:py-4">
+    <!-- Error -->
     <Alert
       v-if="error"
       variant="destructive"
@@ -154,31 +135,31 @@ function conformanceTone(score: number): string {
     <!-- Loading -->
     <template v-else-if="pending">
       <Skeleton class="h-[120px] rounded-xl" />
-      <div class="grid gap-6 lg:grid-cols-3">
-        <Skeleton class="h-[420px] rounded-xl lg:col-span-2" />
-        <Skeleton class="h-[420px] rounded-xl" />
-      </div>
+      <Skeleton class="h-[520px] rounded-xl" />
     </template>
 
     <!-- Loaded -->
-    <template v-else-if="agent && health">
-      <!-- Agent header -->
+    <template v-else-if="health">
+      <!-- ============ HEADER: identity + aggregate health ============ -->
       <SectionCard padding="roomy">
         <div class="flex flex-col gap-5">
           <div class="flex flex-wrap items-start justify-between gap-4">
             <div class="flex min-w-0 items-start gap-4">
               <Avatar class="size-12 shrink-0 rounded-full">
                 <AvatarFallback class="rounded-full bg-primary/10 text-sm font-semibold text-primary">
-                  {{ initials(agent.name) }}
+                  {{ initials(agentName) }}
                 </AvatarFallback>
               </Avatar>
               <div class="flex min-w-0 flex-col gap-1">
                 <h1 class="text-2xl font-semibold leading-tight tracking-tight">
-                  {{ agent.name }}
+                  {{ agentName }}
                 </h1>
-                <p class="flex items-start gap-1.5 text-sm text-muted-foreground">
+                <p
+                  v-if="agent?.ghl.businessName"
+                  class="flex items-start gap-1.5 text-sm text-muted-foreground"
+                >
                   <Target class="mt-0.5 size-4 shrink-0" />
-                  {{ agent.goal }}
+                  {{ agent.ghl.businessName }}<template v-if="agent.ghl.agentType"> · {{ agent.ghl.agentType }}</template>
                 </p>
               </div>
             </div>
@@ -187,380 +168,233 @@ function conformanceTone(score: number): string {
               variant="outline"
               size="sm"
             >
-              <NuxtLink :to="`/calls?agentId=${agent.id}`">
+              <NuxtLink :to="`/calls?agentId=${id}`">
                 View all calls
                 <ArrowUpRight class="size-4" />
               </NuxtLink>
             </Button>
           </div>
 
-          <div
-            v-if="agent.successCriteria.length"
-            class="flex flex-wrap gap-2"
-          >
-            <Badge
-              v-for="c in agent.successCriteria"
-              :key="c.id"
-              variant="outline"
-              class="gap-1.5 rounded-md font-medium"
-            >
-              <CircleCheck :class="cn('size-3', toneClasses('success').text)" />
-              {{ c.label }}
-            </Badge>
+          <!-- Stat strip (aggregate health — no per-criterion artifact tags) -->
+          <div class="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <div class="flex flex-col gap-1">
+              <span class="text-[12px] font-medium text-muted-foreground">Avg score</span>
+              <span :class="cn('text-2xl font-semibold tabular-nums', toneClasses(scoreToneName(health.callsAnalyzed ? health.avgScore : null)).text)">
+                {{ health.callsAnalyzed ? Math.round(health.avgScore) : '—' }}
+              </span>
+            </div>
+            <div class="flex flex-col gap-1">
+              <span class="text-[12px] font-medium text-muted-foreground">Calls analyzed</span>
+              <span class="text-2xl font-semibold tabular-nums">{{ health.callsAnalyzed }}</span>
+            </div>
+            <div class="flex flex-col gap-1">
+              <span class="text-[12px] font-medium text-muted-foreground">Failure rate</span>
+              <span :class="cn('text-2xl font-semibold tabular-nums', failureTone)">
+                {{ Math.round(health.failureRate * 100) }}%
+              </span>
+            </div>
+            <div class="flex flex-col gap-1">
+              <span class="text-[12px] font-medium text-muted-foreground">Flow adherence</span>
+              <span
+                v-if="health.avgFlowAdherence != null"
+                :class="cn('text-2xl font-semibold tabular-nums', toneClasses(scoreToneName(health.avgFlowAdherence)).text)"
+              >{{ Math.round(health.avgFlowAdherence) }}</span>
+              <span
+                v-else
+                class="text-2xl font-semibold tabular-nums text-muted-foreground"
+              >—</span>
+            </div>
           </div>
         </div>
       </SectionCard>
 
-      <div class="grid gap-6 lg:grid-cols-3">
-        <!-- Wide column: stats + drift + expected flow + failing calls -->
-        <div class="flex min-w-0 flex-col gap-6 lg:col-span-2">
-          <!-- Stat strip -->
-          <SectionCard padding="roomy">
-            <div class="grid grid-cols-2 gap-4 sm:grid-cols-4">
-              <div class="flex flex-col gap-1">
-                <span class="flex items-center gap-1 text-[12px] font-medium text-muted-foreground">
-                  Avg score
-                  <TooltipProvider :delay-duration="120">
-                    <Tooltip>
-                      <TooltipTrigger as-child>
-                        <button
-                          type="button"
-                          class="rounded-full text-muted-foreground focus-visible:outline-2 focus-visible:outline-primary"
-                          aria-label="What is Avg score?"
-                        >
-                          <Info class="size-3.5" />
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent class="max-w-xs text-xs">
-                        Avg score — this agent's average Call score (the overall weighted QA score of a call, 0–100) across its analyzed calls.
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </span>
-                <span :class="cn('text-2xl font-semibold tabular-nums', toneClasses(scoreToneName(health.callsAnalyzed ? health.avgScore : null)).text)">
-                  {{ health.callsAnalyzed ? Math.round(health.avgScore) : '—' }}
-                </span>
-              </div>
-              <div class="flex flex-col gap-1">
-                <span class="text-[12px] font-medium text-muted-foreground">Calls analyzed</span>
-                <span class="text-2xl font-semibold tabular-nums">{{ health.callsAnalyzed }}</span>
-              </div>
-              <div class="flex flex-col gap-1">
-                <span class="text-[12px] font-medium text-muted-foreground">Failure rate</span>
-                <span :class="cn('text-2xl font-semibold tabular-nums', failureTone)">
-                  {{ Math.round(health.failureRate * 100) }}%
-                </span>
-              </div>
-              <div class="flex flex-col gap-1">
-                <span class="text-[12px] font-medium text-muted-foreground">Open use actions</span>
-                <span class="text-2xl font-semibold tabular-nums">{{ health.openUseActions }}</span>
-              </div>
-            </div>
-          </SectionCard>
-
-          <!--
-            Expected flow + actual drift, fused (P19): the per-node skip-rate list
-            and the expected-flow diagram now live in ONE card so they read as a
-            single expected-vs-actual story, and the diagram is tinted by each
-            node's fleet drift rate (the agent's drift heatmap) instead of being a
-            static design picture beside a disconnected bar list.
-          -->
-          <SectionCard
-            v-if="flow || (flowSummary && flowSummary.callsScored > 0)"
-            title="Expected call flow vs. actual drift"
-            description="The agent's designed flow, painted with where its scored calls actually skip or drift."
-            padding="roomy"
-          >
-            <template
-              v-if="flowSummary && flowSummary.avgConformance !== null"
-              #actions
-            >
-              <div class="text-right">
-                <div class="flex items-center justify-end gap-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Flow adherence
-                  <TooltipProvider :delay-duration="120">
-                    <Tooltip>
-                      <TooltipTrigger as-child>
-                        <button
-                          type="button"
-                          class="rounded-full text-muted-foreground focus-visible:outline-2 focus-visible:outline-primary"
-                          aria-label="What is Flow adherence?"
-                        >
-                          <Info class="size-3.5" />
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent class="max-w-xs text-xs">
-                        Flow adherence — how closely this agent's calls followed their expected flow (0–100), averaged across {{ flowSummary.callsScored }} scored call{{ flowSummary.callsScored === 1 ? '' : 's' }}.
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                </div>
-                <div :class="cn('text-2xl font-semibold tabular-nums', conformanceTone(flowSummary.avgConformance))">
-                  {{ flowSummary.avgConformance }}
-                </div>
-              </div>
-            </template>
-
-            <div class="flex flex-col gap-5">
-              <!-- Actual: where the agent's scored calls depart from the design. -->
-              <div
-                v-if="flowSummary && flowSummary.nodes.length"
-                class="flex flex-col gap-4"
-              >
-                <p class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Most-skipped steps ({{ flowSummary.callsScored }} scored call{{ flowSummary.callsScored === 1 ? '' : 's' }})
-                </p>
-                <div
-                  v-for="n in flowSummary.nodes.slice(0, 5)"
-                  :key="n.nodeId"
-                  class="grid grid-cols-[1fr_auto] items-center gap-x-3 gap-y-1.5"
-                >
-                  <span class="flex min-w-0 items-center gap-2 text-sm">
-                    <Badge
-                      variant="outline"
-                      class="shrink-0 rounded-md text-[11px] capitalize"
-                    >{{ n.kind }}</Badge>
-                    <span class="truncate font-medium">{{ n.label }}</span>
-                  </span>
-                  <span class="shrink-0 text-right text-sm tabular-nums text-muted-foreground">
-                    {{ Math.round(driftRate(n) * 100) }}% {{ n.skipRate > 0 ? 'skipped' : 'drifted' }}
-                  </span>
-                  <div
-                    class="col-span-2 h-2 overflow-hidden rounded-full"
-                    :class="driftToneSet(n).bg"
-                    role="progressbar"
-                    :aria-valuenow="Math.round(driftRate(n) * 100)"
-                    aria-valuemin="0"
-                    aria-valuemax="100"
-                    :aria-label="`${n.label} drift`"
-                  >
-                    <div
-                      class="h-full rounded-full"
-                      :class="driftToneSet(n).dot"
-                      :style="{ width: `${Math.max(2, Math.round(driftRate(n) * 100))}%` }"
-                    />
-                  </div>
-                </div>
-              </div>
-              <p
-                v-else-if="flowSummary && flowSummary.callsScored > 0"
-                class="text-sm text-muted-foreground"
-              >
-                No recurring drift — scored calls follow the expected flow.
-              </p>
-
-              <!-- Expected: the design diagram, tinted by each node's drift rate. -->
-              <div
-                v-if="flow"
-                class="border-t pt-5"
-              >
-                <FlowDiagram
-                  :flow="flow"
-                  :alignment="aggregateAlignment"
-                  :interactive="false"
-                />
-              </div>
-            </div>
-          </SectionCard>
-
-          <!-- Calls needing attention -->
-          <div class="flex flex-col gap-3">
-            <div class="flex items-end justify-between gap-3">
-              <h2 class="text-[18px] font-semibold tracking-tight">
-                Calls needing attention
+      <!-- ============ INTENDED CALL FLOW (happy path — no drift) ============ -->
+      <SectionCard padding="dense">
+        <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div class="flex items-center gap-2">
+            <span class="flex size-7 items-center justify-center rounded-lg bg-primary/12 text-primary">
+              <Route class="size-4" />
+            </span>
+            <div>
+              <h2 class="text-[15px] font-semibold leading-tight">
+                Intended call flow
               </h2>
-              <span class="text-sm text-muted-foreground">
-                {{ failingCalls.length }} of {{ allCalls.length }}
-              </span>
-            </div>
-            <CallTable
-              :calls="failingCalls"
-              :show-agent="false"
-              :dense="true"
-              empty-title="No calls need attention"
-              empty-hint="Every analyzed call for this agent is within criteria."
-            />
-            <NuxtLink
-              v-if="allCalls.length"
-              :to="`/calls?agentId=${agent.id}`"
-              class="inline-flex w-fit items-center gap-1.5 rounded-md text-sm font-medium text-primary hover:underline focus-visible:outline-2 focus-visible:outline-primary"
-            >
-              View all calls for this agent
-              <ArrowUpRight class="size-4" />
-            </NuxtLink>
-          </div>
-        </div>
-
-        <!-- Narrow column: Criteria-met ring + recommendations -->
-        <div class="flex min-w-0 flex-col gap-6">
-          <SectionCard
-            title="Criteria met"
-            description="Share of this agent's success criteria its scored calls actually met."
-            padding="roomy"
-          >
-            <div class="flex flex-col items-center gap-4">
-              <!--
-                SSR-stable Criteria-met ring (P01): a stroke-dasharray SVG arc over
-                a VISIBLE neutral track. Plots the true criteria-met rate
-                (criteriaMetRate, share of perCriterion.met) — NOT the Call score.
-                The teal arc subtends exactly criteriaMetPct/100 of the circle and
-                renders identically server-side and after hydration.
-              -->
-              <div
-                class="relative"
-                :style="{ width: `${RING.size}px`, height: `${RING.size}px` }"
-              >
-                <svg
-                  :viewBox="`0 0 ${RING.size} ${RING.size}`"
-                  class="size-full -rotate-90"
-                  role="img"
-                  :aria-label="hasCriteriaData ? `${criteriaMetPct}% of success criteria met` : 'No criteria-met data yet'"
-                >
-                  <!-- Track: visible neutral ring (not the invisible near-white --muted). -->
-                  <circle
-                    :cx="RING.size / 2"
-                    :cy="RING.size / 2"
-                    :r="ringRadius"
-                    fill="none"
-                    stroke="var(--border)"
-                    :stroke-width="RING.stroke"
-                  />
-                  <!-- Value arc: single teal accent series. -->
-                  <circle
-                    v-if="hasCriteriaData"
-                    :cx="RING.size / 2"
-                    :cy="RING.size / 2"
-                    :r="ringRadius"
-                    fill="none"
-                    stroke="var(--primary)"
-                    :stroke-width="RING.stroke"
-                    stroke-linecap="round"
-                    :stroke-dasharray="`${ringDash} ${ringCircumference}`"
-                    class="motion-safe:transition-[stroke-dasharray] motion-safe:duration-[var(--dur)] motion-safe:ease-[var(--ease)]"
-                  />
-                </svg>
-                <div class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
-                  <span :class="cn('text-3xl font-semibold tabular-nums', criteriaTone)">
-                    {{ hasCriteriaData ? `${criteriaMetPct}%` : '—' }}
-                  </span>
-                  <span class="text-[12px] text-muted-foreground">criteria met</span>
-                </div>
-              </div>
-
-              <p
-                v-if="!hasCriteriaData"
-                class="text-center text-sm text-muted-foreground"
-              >
-                No analyzed calls yet — this ring fills once we score the agent's calls.
+              <p class="text-[12px] text-muted-foreground">
+                How {{ agentName }} is designed to handle a call — the purpose of each step.
               </p>
-
-              <!--
-                Per-criterion list (P01): the criteria measured. A true per-criterion
-                met % needs server per-criterion aggregates we don't carry here, so we
-                show the criteria and their kind honestly rather than fabricate a rate.
-              -->
-              <div
-                v-if="agent.successCriteria.length"
-                class="w-full space-y-2.5"
-              >
-                <p class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                  Success criteria
-                </p>
-                <div
-                  v-for="c in agent.successCriteria"
-                  :key="c.id"
-                  class="flex items-center justify-between gap-2 text-sm"
-                >
-                  <span class="flex min-w-0 items-center gap-1.5 truncate text-muted-foreground">
-                    <CircleCheck :class="cn('size-3.5 shrink-0', toneClasses('success').text)" />
-                    <span class="truncate">{{ c.label }}</span>
-                  </span>
-                  <Badge
-                    variant="outline"
-                    class="shrink-0 rounded-md text-[11px] capitalize"
-                  >
-                    {{ c.kind }}
-                  </Badge>
-                </div>
-              </div>
             </div>
-          </SectionCard>
-
-          <div class="flex flex-col gap-3">
-            <h2 class="text-[18px] font-semibold tracking-tight">
-              Recommendations
-            </h2>
-            <div
-              v-if="recommendations.length"
-              class="flex flex-col gap-3"
-            >
-              <RecommendationCard
-                v-for="rec in recommendations"
-                :key="rec.recommendation.id"
-                :item="rec"
-              />
-            </div>
-            <SectionCard
-              v-else
-              class="border-dashed"
-            >
-              <div class="flex flex-col items-center gap-3 py-8 text-center">
-                <div class="flex size-10 items-center justify-center rounded-full bg-muted text-muted-foreground">
-                  <Lightbulb class="size-5" />
-                </div>
-                <div class="space-y-1">
-                  <p class="text-sm font-semibold">
-                    No recommendations yet
-                  </p>
-                  <p class="max-w-xs text-sm text-muted-foreground">
-                    Analyze more of this agent's calls to surface concrete fixes for its prompt, script, or coaching.
-                  </p>
-                </div>
-                <Button
-                  as-child
-                  variant="outline"
-                  size="sm"
-                >
-                  <NuxtLink :to="`/calls?agentId=${agent.id}`">
-                    View all calls
-                  </NuxtLink>
-                </Button>
-              </div>
-            </SectionCard>
           </div>
-        </div>
-      </div>
-    </template>
-
-    <!-- Not found (data resolved, no entity) — centered block. -->
-    <div
-      v-else
-      class="flex justify-center"
-    >
-      <SectionCard class="w-full max-w-md border-dashed">
-        <div class="flex flex-col items-center gap-3 py-12 text-center">
-          <div class="flex size-12 items-center justify-center rounded-full bg-muted text-muted-foreground">
-            <Users class="size-6" />
-          </div>
-          <div class="space-y-1">
-            <p class="text-base font-semibold">
-              Agent not found
-            </p>
-            <p class="max-w-xs text-sm text-muted-foreground">
-              This agent may have been removed, or the link is out of date.
-            </p>
-          </div>
-          <Button
-            as-child
-            variant="outline"
-            size="sm"
+          <span
+            v-if="hasFlow"
+            class="rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary"
           >
-            <NuxtLink to="/agents">
-              Back to agents
-            </NuxtLink>
+            Inferred from instructions
+          </span>
+        </div>
+
+        <div
+          v-if="hasFlow && inferredFlow"
+          class="grid gap-3 lg:grid-cols-[minmax(0,1fr)_300px] lg:items-start"
+        >
+          <IntendedFlowGraph
+            :flow="inferredFlow"
+            :selected-node-id="selectedNodeId"
+            height-class="h-[440px] lg:h-[600px]"
+            @select="onSelectNode"
+            @select-edge="onSelectEdge"
+          />
+          <FlowNodeDetail
+            class="lg:sticky lg:top-[4.5rem] lg:max-h-[600px] lg:overflow-y-auto"
+            :flow="inferredFlow"
+            :selected-node-id="selectedNodeId"
+            :selected-edge="selectedEdge"
+          />
+        </div>
+        <!-- Mapping in progress (auto-triggered on load, or via the button). -->
+        <div
+          v-else-if="mappingFlow"
+          class="flex flex-col items-center gap-2 rounded-lg border border-primary/30 bg-primary/[0.04] py-10 text-center"
+        >
+          <Loader2 class="size-5 animate-spin text-primary" />
+          <p class="text-sm font-semibold">
+            Mapping the intended call flow…
+          </p>
+          <p class="max-w-xs text-sm text-muted-foreground">
+            Compiling {{ agentName }}'s instructions into its intended call-handling flow.
+          </p>
+        </div>
+        <!-- Not mapped yet (auto-map errored or hasn't run) — manual trigger. -->
+        <div
+          v-else
+          class="flex flex-col items-center gap-2 rounded-lg border border-dashed py-10 text-center"
+        >
+          <span class="flex size-9 items-center justify-center rounded-full bg-muted text-muted-foreground">
+            <Route class="size-4" />
+          </span>
+          <p class="text-sm font-semibold">
+            {{ mapError ? 'Couldn\'t map the flow' : 'No flow mapped yet' }}
+          </p>
+          <p class="max-w-xs text-sm text-muted-foreground">
+            {{ mapError ?? 'Map this agent\'s intended call flow from its instructions — no calls needed.' }}
+          </p>
+          <Button
+            size="sm"
+            class="mt-1"
+            @click="mapFlow"
+          >
+            <Route class="size-4" />
+            Map intended flow
           </Button>
         </div>
       </SectionCard>
+
+      <!-- ============ OVERALL ANALYSIS: scorecard + recurring fixes ============ -->
+      <div class="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <!-- Aggregate per-criterion scorecard -->
+        <SectionCard
+          title="Scorecard"
+          :description="health.callsAnalyzed ? `Average per criterion across ${health.callsAnalyzed} analyzed call${health.callsAnalyzed === 1 ? '' : 's'}.` : undefined"
+          padding="dense"
+        >
+          <div
+            v-if="criteriaScorecard.length"
+            class="flex flex-col gap-3"
+          >
+            <div
+              v-for="c in criteriaScorecard"
+              :key="c.criterionId"
+              class="space-y-1.5"
+            >
+              <div class="flex items-center justify-between gap-2 text-[13px]">
+                <span class="truncate font-medium">{{ c.label }}</span>
+                <span :class="cn('shrink-0 font-semibold tabular-nums', scoreTone(c.avgScore))">
+                  {{ c.avgScore != null ? c.avgScore : '—' }}
+                </span>
+              </div>
+              <div :class="cn('h-1.5 overflow-hidden rounded-full', toneClasses(scoreToneName(c.avgScore)).bg)">
+                <div
+                  :class="cn('h-full rounded-full', toneClasses(scoreToneName(c.avgScore)).dot)"
+                  :style="{ width: `${Math.max(2, c.avgScore ?? 0)}%` }"
+                />
+              </div>
+              <p
+                v-if="c.metRate != null"
+                class="text-[11px] text-muted-foreground"
+              >
+                {{ Math.round(c.metRate * 100) }}% met · {{ c.callsScored }} call{{ c.callsScored === 1 ? '' : 's' }}
+              </p>
+            </div>
+          </div>
+          <p
+            v-else
+            class="py-6 text-center text-sm text-muted-foreground"
+          >
+            No analyzed calls yet — scores appear once calls are evaluated.
+          </p>
+        </SectionCard>
+
+        <!-- Recurring fixes (deduped recommendations across this agent's calls) -->
+        <SectionCard
+          title="Recurring fixes"
+          :description="recommendations.length ? 'The most common improvements across this agent’s calls.' : undefined"
+          padding="dense"
+        >
+          <div
+            v-if="recommendations.length"
+            class="flex flex-col gap-2.5"
+          >
+            <RecommendationCard
+              v-for="rec in recommendations"
+              :key="rec.recommendation.id"
+              :item="rec"
+            />
+          </div>
+          <div
+            v-else
+            class="flex flex-col items-center gap-1.5 py-6 text-center"
+          >
+            <span class="flex size-9 items-center justify-center rounded-full bg-success-soft text-success">
+              <Lightbulb class="size-4" />
+            </span>
+            <p class="text-sm font-semibold">
+              Nothing to fix
+            </p>
+            <p class="max-w-xs text-sm text-muted-foreground">
+              No recurring recommendations across this agent's analyzed calls.
+            </p>
+          </div>
+        </SectionCard>
+      </div>
+
+      <!-- ============ CALL LOGS (each row links to its drift analysis) ============ -->
+      <div class="flex flex-col gap-3">
+        <div class="flex items-end justify-between gap-3">
+          <h2 class="text-[18px] font-semibold tracking-tight">
+            Call logs
+          </h2>
+          <span class="text-sm text-muted-foreground">{{ calls.length }} synced</span>
+        </div>
+        <CallTable
+          :calls="calls"
+          :show-agent="false"
+          :dense="true"
+          empty-title="No calls synced"
+          empty-hint="Sync calls from HighLevel to populate this agent's call list."
+        />
+      </div>
+    </template>
+
+    <!-- Agent not found / empty -->
+    <div
+      v-else
+      class="mx-auto flex w-full max-w-md flex-col items-center gap-4 py-16 text-center"
+    >
+      <div class="flex size-12 items-center justify-center rounded-full bg-muted text-muted-foreground">
+        <Inbox class="size-6" />
+      </div>
+      <p class="text-sm text-muted-foreground">
+        This agent couldn't be found.
+      </p>
     </div>
   </div>
 </template>

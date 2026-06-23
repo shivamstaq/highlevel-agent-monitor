@@ -1,4 +1,4 @@
-import type { LLMCompleteOptions, LLMProvider } from './types'
+import type { LLMProvider, LLMRequest, LLMResult } from './types'
 
 /**
  * Ollama provider. Uses the /api/chat endpoint with `format` set to the JSON
@@ -17,32 +17,26 @@ export class OllamaProvider implements LLMProvider {
     this.model = model
   }
 
-  /** True when the Ollama server is reachable. Used for the mock fallback. */
-  async isReachable(): Promise<boolean> {
-    try {
-      const res = await fetch(`${this.baseUrl}/api/tags`, {
-        method: 'GET',
-        signal: AbortSignal.timeout(2000)
-      })
-      return res.ok
-    } catch {
-      return false
-    }
-  }
-
-  async complete(opts: LLMCompleteOptions): Promise<unknown> {
+  /**
+   * R2 unified path. Ollama constrains output to the JSON Schema via `format`.
+   * There is no tool-calling transport here, so both `json` and `tool` modes use
+   * the same constrained-JSON request; we always surface the parsed object as
+   * `toolInput` (already-structured) and the raw string as `text` so the seam can
+   * use either. Ollama reports `prompt_eval_count`/`eval_count` for usage.
+   */
+  async generate(req: LLMRequest): Promise<LLMResult> {
     const res = await fetch(`${this.baseUrl}/api/chat`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        model: this.model,
+        model: req.model || this.model,
         messages: [
-          { role: 'system', content: opts.system },
-          { role: 'user', content: opts.user }
+          { role: 'system', content: req.system },
+          { role: 'user', content: req.user }
         ],
-        format: opts.schema,
+        format: req.jsonSchema,
         stream: false,
-        options: { temperature: 0 }
+        options: { temperature: 0, num_predict: req.maxTokens }
       }),
       signal: AbortSignal.timeout(120000)
     })
@@ -52,9 +46,18 @@ export class OllamaProvider implements LLMProvider {
       throw new Error(`Ollama request failed (${res.status}): ${detail.slice(0, 300)}`)
     }
 
-    const body = (await res.json()) as { message?: { content?: string } }
+    const body = (await res.json()) as {
+      message?: { content?: string }
+      prompt_eval_count?: number
+      eval_count?: number
+    }
     const raw = body.message?.content ?? ''
-    return parseJsonContent(raw)
+    const parsed = parseJsonContent(raw)
+    return {
+      text: typeof parsed === 'string' ? parsed : JSON.stringify(parsed),
+      toolInput: parsed,
+      usage: { input: body.prompt_eval_count ?? 0, output: body.eval_count ?? 0 }
+    }
   }
 }
 

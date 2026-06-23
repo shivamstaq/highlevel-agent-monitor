@@ -72,13 +72,11 @@ const SECTION_ROUTES: Record<string, SegmentRoute> = {
 }
 
 /**
- * Labels for known *named* second segments (static child routes such as
- * `/agents/new`). Dynamic ids fall through to a generic leaf label that page
- * overrides replace with the resolved entity name.
+ * Labels for known *named* second segments (static child routes). Dynamic ids
+ * fall through to a generic leaf label that page overrides replace with the
+ * resolved entity name. (The create-agent flow was removed — read/mirror only.)
  */
-const NAMED_LEAF_LABELS: Record<string, Record<string, string>> = {
-  agents: { new: 'New agent' }
-}
+const NAMED_LEAF_LABELS: Record<string, Record<string, string>> = {}
 
 /** Generic leaf label for a dynamic detail route before its name resolves. */
 const DETAIL_FALLBACK_LABEL: Record<string, string> = {
@@ -102,15 +100,15 @@ export function trailFromPath(path: string): Crumb[] {
   const clean = path.split('?')[0]?.split('#')[0] ?? '/'
   const segments = clean.split('/').filter(Boolean)
 
-  // Root / Overview is a top-level sibling, rendered as the standalone leaf.
-  if (segments.length === 0) return [{ label: 'Overview' }]
+  // Root redirects to Agents (the default landing); render that as the leaf.
+  if (segments.length === 0) return [{ label: 'Agents' }]
 
   const [head, child] = segments
   const section = head ? SECTION_ROUTES[head] : undefined
 
   // Unknown top-level route: best-effort single readable crumb.
   if (!section) {
-    return [{ label: titleizeSegment(head ?? 'Overview') }]
+    return [{ label: titleizeSegment(head ?? 'Agents') }]
   }
 
   // Top-level list/index page: standalone leaf (no false ancestor).

@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import type { AgentHealth } from '#shared/types'
 import { computed, ref } from 'vue'
-import { PlusCircle, Search, Users, X } from 'lucide-vue-next'
+import { RefreshCw, Search, Users, X } from 'lucide-vue-next'
+import { toast } from 'vue-sonner'
 import {
   Select,
   SelectContent,
@@ -24,9 +25,10 @@ import { useBreadcrumb } from '~/composables/useBreadcrumb'
  * Full-width roster reusing the shared AgentTable (sortable, ~48px rows,
  * full-row drill-down to /agents/:id, keyboard reachable). Adds a search box,
  * a status filter (healthy / at risk / critical / no data), and a header
- * "New agent" action. Loading + empty + error states are all handled.
+ * "Sync from HighLevel" action (agents are mirrored from GHL — read-only, no
+ * local authoring). Loading + empty + error states are all handled.
  */
-const { getFleet } = useApi()
+const { getFleet, syncAgents } = useApi()
 const { scoreToneName } = useTone()
 const { setBreadcrumb } = useBreadcrumb()
 
@@ -65,10 +67,7 @@ const filtered = computed<AgentHealth[]>(() => {
   return agents.value.filter((a) => {
     if (status.value !== 'all' && statusOf(a) !== status.value) return false
     if (!q) return true
-    return (
-      a.agent.name.toLowerCase().includes(q)
-      || a.agent.goal.toLowerCase().includes(q)
-    )
+    return a.agentName.toLowerCase().includes(q)
   })
 })
 
@@ -79,10 +78,29 @@ function clearFilters() {
   search.value = ''
   status.value = 'all'
 }
+
+/* Mirror agents + flow graphs from HighLevel, then refresh the roster. */
+const syncing = ref(false)
+async function syncFromGhl() {
+  if (syncing.value) return
+  syncing.value = true
+  try {
+    await toast.promise(
+      syncAgents().then(r => refresh().then(() => r)),
+      {
+        loading: 'Syncing agents from HighLevel…',
+        success: (r: { synced: number }) => `Synced ${r.synced} agent${r.synced === 1 ? '' : 's'}`,
+        error: 'Couldn\'t sync agents — check the HighLevel connection.'
+      }
+    )
+  } finally {
+    syncing.value = false
+  }
+}
 </script>
 
 <template>
-  <div class="mx-auto flex w-full max-w-[1400px] flex-col gap-6 p-4 md:p-6">
+  <div class="flex w-full flex-col gap-5 px-3 py-3 md:px-4 md:py-4">
     <!-- Page header -->
     <div class="flex flex-wrap items-end justify-between gap-3">
       <div class="space-y-1">
@@ -94,12 +112,13 @@ function clearFilters() {
         </p>
       </div>
       <Button
-        as-child
         size="sm"
+        variant="outline"
+        :disabled="syncing"
+        @click="syncFromGhl"
       >
-        <NuxtLink to="/agents/new">
-          <PlusCircle class="size-4" /> New agent
-        </NuxtLink>
+        <RefreshCw :class="['size-4', syncing && 'motion-safe:animate-spin']" />
+        {{ syncing ? 'Syncing…' : 'Sync from HighLevel' }}
       </Button>
     </div>
 
@@ -142,13 +161,15 @@ function clearFilters() {
             No agents yet
           </h2>
           <p class="mx-auto max-w-sm text-sm text-muted-foreground">
-            Create your first agent and we'll derive its success criteria and expected call flow, then start scoring its calls.
+            Sync your Voice AI agents from HighLevel and we'll derive each agent's success criteria and expected call flow, then start scoring its calls.
           </p>
         </div>
-        <Button as-child>
-          <NuxtLink to="/agents/new">
-            <PlusCircle class="size-4" /> New agent
-          </NuxtLink>
+        <Button
+          :disabled="syncing"
+          @click="syncFromGhl"
+        >
+          <RefreshCw :class="['size-4', syncing && 'motion-safe:animate-spin']" />
+          {{ syncing ? 'Syncing…' : 'Sync from HighLevel' }}
         </Button>
       </div>
     </SectionCard>
@@ -162,8 +183,8 @@ function clearFilters() {
           <Input
             v-model="search"
             type="search"
-            placeholder="Search by name or goal"
-            aria-label="Search agents by name or goal"
+            placeholder="Search by name"
+            aria-label="Search agents by name"
             class="pl-9"
           />
         </div>

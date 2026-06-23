@@ -1,7 +1,9 @@
+<!-- CREATED (our eval layer) — heterogeneous fix card. `target` spans the
+     contract set: prompt | flow_node | agent_config | training. -->
 <script setup lang="ts">
 import type { Recommendation, RecommendationItem } from '#shared/types'
 import { computed, ref } from 'vue'
-import { ArrowUpRight, Check, Copy, FileText, GraduationCap, Phone, Repeat2, Settings2, SlidersHorizontal, User } from 'lucide-vue-next'
+import { ArrowUpRight, Check, Copy, GitBranch, GraduationCap, Phone, Repeat2, Settings2, SlidersHorizontal, User } from 'lucide-vue-next'
 import SectionCard from '~/components/SectionCard.vue'
 import { Badge } from '~/components/ui/badge'
 import { Button } from '~/components/ui/button'
@@ -47,18 +49,18 @@ const displayTitle = computed(() => toSentenceCase(rec.value?.title))
 const callId = computed(() => props.sourceCallId ?? props.item?.callId)
 const agentId = computed(() => props.sourceAgentId ?? props.item?.agentId)
 const agentLabel = computed(() => props.sourceLabel ?? props.item?.agentName)
-const callLabel = computed(() => props.item?.contactName?.trim() || 'View call')
+const callLabel = computed(() => 'View call')
 
 const targetMeta = computed(() => {
   switch (rec.value?.target) {
     case 'prompt':
       return { label: 'System prompt', icon: SlidersHorizontal }
-    case 'script':
-      return { label: 'Call script', icon: FileText }
+    case 'flow_node':
+      return { label: 'Flow node', icon: GitBranch }
     case 'agent_config':
       return { label: 'Agent config', icon: Settings2 }
     default:
-      return { label: 'Coaching', icon: GraduationCap }
+      return { label: 'Training', icon: GraduationCap }
   }
 })
 

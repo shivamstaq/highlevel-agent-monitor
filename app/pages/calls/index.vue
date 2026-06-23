@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Severity } from '#shared/types'
+import type { CallType, Severity } from '#shared/types'
 import { computed, ref, watch } from 'vue'
 import {
   AlertTriangle,
@@ -25,15 +25,15 @@ import {
 } from '~/components/ui/select'
 import { useApi } from '~/composables/useApi'
 import { useBreadcrumb } from '~/composables/useBreadcrumb'
-import { humanizeOutcome } from '~/lib/format'
 
 /**
- * /calls — the Calls inbox (W02). The QA operator's daily triage queue.
+ * /calls — the Calls inbox. The QA operator's daily triage queue.
  *
  * Renders GET /api/calls in the shared <CallTable> with URL-synced
- * agentId / severity / outcome filters (deep-linkable from agent detail
- * 'View all calls' and recommendation deep-links), pagination when long,
- * plus loading / empty / error states.
+ * agentId / severity / callType filters (deep-linkable from agent detail and
+ * recommendation deep-links), pagination when long, plus loading / empty /
+ * error states. Per the rebuilt contract, calls are filtered by callType
+ * (LIVE|TRIAL — GHL trialCall), not the retired `outcome`/`direction`.
  */
 const route = useRoute()
 const router = useRouter()
@@ -44,13 +44,13 @@ setBreadcrumb([{ label: 'Calls' }])
 
 /* ----------------------------------------------------------------------------
  * URL-synced filter state. Query params are the source of truth so every view
- * is deep-linkable (e.g. /calls?agentId=…&severity=high).
+ * is deep-linkable (e.g. /calls?agentId=…&callType=LIVE).
  * ------------------------------------------------------------------------- */
 const ALL = '__all__'
 
 const agentId = computed(() => (typeof route.query.agentId === 'string' ? route.query.agentId : ''))
 const severity = computed(() => (typeof route.query.severity === 'string' ? route.query.severity : ''))
-const outcome = computed(() => (typeof route.query.outcome === 'string' ? route.query.outcome : ''))
+const callType = computed(() => (typeof route.query.callType === 'string' ? route.query.callType : ''))
 
 type QueryRecord = Record<string, string | undefined>
 
@@ -65,17 +65,17 @@ function applyQuery(overrides: QueryRecord, dropPage = true) {
   router.replace({ query: next })
 }
 
-function setFilter(key: 'agentId' | 'severity' | 'outcome', value: string) {
+function setFilter(key: 'agentId' | 'severity' | 'callType', value: string) {
   applyQuery({ [key]: value === ALL ? undefined : value })
 }
 
-const hasFilters = computed(() => Boolean(agentId.value || severity.value || outcome.value))
+const hasFilters = computed(() => Boolean(agentId.value || severity.value || callType.value))
 
 function clearFilters() {
-  applyQuery({ agentId: undefined, severity: undefined, outcome: undefined })
+  applyQuery({ agentId: undefined, severity: undefined, callType: undefined })
 }
 
-/** Drop just the agent scope, keeping any severity/outcome filters (R3-09). */
+/** Drop just the agent scope, keeping any severity/callType filters (R3-09). */
 function clearAgentFilter() {
   applyQuery({ agentId: undefined })
 }
@@ -89,42 +89,29 @@ const { data: calls, pending, error, refresh } = await useAsyncData(
   'calls-inbox',
   () => getCalls({
     agentId: agentId.value || undefined,
-    severity: severity.value || undefined,
-    outcome: outcome.value || undefined
+    severity: (severity.value || undefined) as Severity | undefined,
+    callType: (callType.value || undefined) as CallType | undefined
   }),
-  { watch: [agentId, severity, outcome] }
+  { watch: [agentId, severity, callType] }
 )
 
 const { data: fleet } = await useAsyncData('calls-inbox-agents', () => getFleet())
 
 const agentOptions = computed(() =>
   (fleet.value?.agents ?? [])
-    .map(a => ({ id: a.agent.id, name: a.agent.name }))
+    .map(a => ({ id: a.agentId, name: a.agentName }))
     .sort((a, b) => a.name.localeCompare(b.name))
 )
-
-/**
- * Distinct outcomes present in the unfiltered-by-outcome result, for the
- * dropdown. The raw snake_case token stays the filter KEY (URL value) while the
- * humanized copy is the visible LABEL, sorted by that label (P08).
- */
-const outcomeOptions = computed(() => {
-  const set = new Set<string>()
-  for (const item of calls.value ?? []) {
-    const o = item.call.outcome?.trim()
-    if (o) set.add(o)
-  }
-  // Keep the active outcome selectable even if filtering hid every other row.
-  if (outcome.value) set.add(outcome.value)
-  return [...set]
-    .map(value => ({ value, label: humanizeOutcome(value) }))
-    .sort((a, b) => a.label.localeCompare(b.label))
-})
 
 const severityOptions: { value: Severity, label: string }[] = [
   { value: 'high', label: 'High' },
   { value: 'medium', label: 'Medium' },
   { value: 'low', label: 'Low' }
+]
+
+const callTypeOptions: { value: CallType, label: string }[] = [
+  { value: 'LIVE', label: 'Live' },
+  { value: 'TRIAL', label: 'Trial' }
 ]
 
 const activeAgentName = computed(() =>
@@ -196,9 +183,9 @@ const severityModel = computed({
   get: () => severity.value || ALL,
   set: v => setFilter('severity', v)
 })
-const outcomeModel = computed({
-  get: () => outcome.value || ALL,
-  set: v => setFilter('outcome', v)
+const callTypeModel = computed({
+  get: () => callType.value || ALL,
+  set: v => setFilter('callType', v)
 })
 
 // Keep the document title meaningful when scoped to one agent.
@@ -206,7 +193,7 @@ useHead({ title: computed(() => (activeAgentName.value ? `Calls · ${activeAgent
 </script>
 
 <template>
-  <div class="mx-auto flex w-full max-w-[1400px] flex-col gap-6 p-4 md:p-6">
+  <div class="flex w-full flex-col gap-5 px-3 py-3 md:px-4 md:py-4">
     <!-- Page header -->
     <div class="flex flex-wrap items-end justify-between gap-3">
       <div class="space-y-1">
@@ -258,6 +245,28 @@ useHead({ title: computed(() => (activeAgentName.value ? `Calls · ${activeAgent
           </SelectContent>
         </Select>
 
+        <Select v-model="callTypeModel">
+          <SelectTrigger
+            size="sm"
+            class="w-[150px]"
+            aria-label="Filter by call type"
+          >
+            <SelectValue placeholder="Any type" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem :value="ALL">
+              Any type
+            </SelectItem>
+            <SelectItem
+              v-for="opt in callTypeOptions"
+              :key="opt.value"
+              :value="opt.value"
+            >
+              {{ opt.label }}
+            </SelectItem>
+          </SelectContent>
+        </Select>
+
         <Select v-model="severityModel">
           <SelectTrigger
             size="sm"
@@ -280,31 +289,6 @@ useHead({ title: computed(() => (activeAgentName.value ? `Calls · ${activeAgent
           </SelectContent>
         </Select>
 
-        <Select
-          v-if="outcomeOptions.length"
-          v-model="outcomeModel"
-        >
-          <SelectTrigger
-            size="sm"
-            class="w-[180px]"
-            aria-label="Filter by outcome"
-          >
-            <SelectValue placeholder="Any outcome" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem :value="ALL">
-              Any outcome
-            </SelectItem>
-            <SelectItem
-              v-for="opt in outcomeOptions"
-              :key="opt.value"
-              :value="opt.value"
-            >
-              {{ opt.label }}
-            </SelectItem>
-          </SelectContent>
-        </Select>
-
         <Button
           v-if="hasFilters"
           variant="ghost"
@@ -318,9 +302,8 @@ useHead({ title: computed(() => (activeAgentName.value ? `Calls · ${activeAgent
       </div>
     </SectionCard>
 
-    <!-- Active agent scope chip (R3-09) — mirrors /recommendations. The agent
-         name links to its detail page; the X removes just the agent scope and
-         keeps any severity/outcome filters in place. -->
+    <!-- Active agent scope chip (R3-09). The agent name links to its detail
+         page; the X removes just the agent scope and keeps any other filters. -->
     <div
       v-if="agentId"
       class="flex flex-wrap items-center gap-2"

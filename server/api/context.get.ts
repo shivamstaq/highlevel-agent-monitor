@@ -22,7 +22,9 @@ export default defineEventHandler((event) => {
     const ctx = decryptUserContext(encryptedData, config.ghlSharedSecret)
     if (ctx) {
       return {
-        locationId: ctx.locationId ?? ctx.companyId ?? fallbackLocationId,
+        // GHL's Location-context Custom-Page payload carries `activeLocation` (not
+        // `locationId`); prefer it so the signed scope resolves to the location, not the agency.
+        locationId: ctx.activeLocation ?? ctx.locationId ?? ctx.companyId ?? fallbackLocationId,
         userId: ctx.userId,
         email: ctx.email,
         userName: ctx.userName,

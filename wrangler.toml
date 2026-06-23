@@ -1,0 +1,56 @@
+# Cloudflare Pages config for the Voice AI Observability Copilot.
+#
+# Used by: NITRO_PRESET=cloudflare-pages pnpm build && wrangler pages deploy dist
+#
+# Before first deploy:
+#   1. Create the KV namespace:   wrangler kv namespace create DATA
+#   2. Paste the returned id below (replace e3c33fe53e56489f89e09d7dad83a0c7).
+#   3. wrangler pages project create ghl-copilot   (or via dashboard)
+#
+# nodejs_compat is required: server/utils/ghlContext.ts uses node:crypto
+# (createHash / createDecipheriv) to decode the GHL signed-context blob, and
+# server/services/analysis.ts uses node:crypto randomUUID/createHash.
+
+name = "ghl-copilot"
+pages_build_output_dir = "dist"
+compatibility_date = "2025-01-15"
+compatibility_flags = ["nodejs_compat"]
+
+# Durable storage for agents / calls / transcripts / analyses / flows / timelines.
+# Bound to the `DATA` namespace that nitro.storage references in nuxt.config.ts.
+[[kv_namespaces]]
+binding = "DATA"
+id = "e3c33fe53e56489f89e09d7dad83a0c7"
+
+# Runtime config overrides. On Cloudflare, Nuxt runtimeConfig is overridden by
+# env vars prefixed NUXT_ (NUXT_LLM_PROVIDER -> runtimeConfig.llmProvider, etc.).
+# These are the NON-SECRET values; secrets go via `wrangler pages secret put`.
+#
+# Analysis engine on the deployed app: REAL Anthropic Claude (NUXT_LLM_PROVIDER
+# below + the NUXT_ANTHROPIC_API_KEY secret). Per-role models are the cost-low
+# floor in server/services/llm/config.ts: reasoner = claude-sonnet-4-6
+# (stages / criteria / call analysis), labeler = claude-haiku-4-5 (turn
+# labeling). The deterministic engine is only a labeled fail-loud fallback, NOT
+# the deployed default. Setting/rotating a secret requires a redeploy to take
+# effect (`wrangler pages deploy dist`).
+#
+# REQUIRED secrets (set once; redeploy after any change):
+#   wrangler pages secret put NUXT_ANTHROPIC_API_KEY  --project-name ghl-copilot  # Claude analysis
+#   wrangler pages secret put NUXT_GHL_PIT_TOKEN       --project-name ghl-copilot  # GHL Private Integration Token (read call-logs/agents)
+#   wrangler pages secret put NUXT_GHL_LOCATION_ID     --project-name ghl-copilot  # default sub-account (location) id
+# OPTIONAL secrets:
+#   wrangler pages secret put NUXT_GHL_SHARED_SECRET   --project-name ghl-copilot  # Marketplace app Shared Secret (signed user-context decode; Route B only)
+#   wrangler pages secret put NUXT_GHL_WEBHOOK_TOKEN   --project-name ghl-copilot  # shared ?token= gate for the UNSIGNED Workflow webhook route
+[vars]
+NUXT_LLM_PROVIDER = "anthropic"
+NUXT_GHL_API_BASE = "https://services.leadconnectorhq.com"
+# GHL webhook signature verification — PUBLIC keys (non-secret, safe in [vars]).
+# Ed25519 (current X-GHL-Signature): GHL's published key is BAKED IN as the
+# default in server/utils/ghlWebhook.ts, so this var is only needed to override
+# on key rotation. The legacy RSA key (X-WH-Signature, removed 2026-07-01) is
+# opt-in — set NUXT_GHL_WEBHOOK_RSA_PUBKEY (PEM, "\n"-escaped) to accept it.
+# For the UNSIGNED GHL Workflow webhook route, set a shared gate via
+#   wrangler pages secret put NUXT_GHL_WEBHOOK_TOKEN
+# and call the endpoint as /api/webhooks/ghl?token=<that-value>.
+# NUXT_GHL_WEBHOOK_ED25519_PUBKEY = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"
+# NUXT_GHL_WEBHOOK_RSA_PUBKEY = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----"

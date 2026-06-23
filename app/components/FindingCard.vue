@@ -1,3 +1,5 @@
+<!-- CREATED (our eval layer) — one finding (type / severity / title / detail),
+     citing transcript entries via evidenceEntryIdxs to drive the highlight. -->
 <script setup lang="ts">
 import type { Finding } from '#shared/types'
 import { computed } from 'vue'
@@ -43,12 +45,12 @@ const tone = computed(() => severityTone(props.finding.severity))
  */
 const displayTitle = computed(() => toSentenceCase(props.finding.title))
 
-const hasEvidence = computed(() => (props.finding.evidenceTurnIdxs?.length ?? 0) > 0)
+const hasEvidence = computed(() => (props.finding.evidenceEntryIdxs?.length ?? 0) > 0)
 
 const evidenceLabel = computed(() => {
-  const idxs = props.finding.evidenceTurnIdxs ?? []
+  const idxs = props.finding.evidenceEntryIdxs ?? []
   if (!idxs.length) return ''
-  return `Cites turn${idxs.length > 1 ? 's' : ''} ${idxs.map(i => `#${i}`).join(', ')}`
+  return `Cites entr${idxs.length > 1 ? 'ies' : 'y'} ${idxs.map(i => `#${i}`).join(', ')}`
 })
 </script>
 

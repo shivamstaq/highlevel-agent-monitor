@@ -2,10 +2,7 @@
 import { computed } from 'vue'
 import {
   AudioLines,
-  LayoutDashboard,
-  ListChecks,
   Phone,
-  PlusCircle,
   Settings,
   Users
 } from 'lucide-vue-next'
@@ -15,7 +12,6 @@ import {
   SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
-  SidebarGroupLabel,
   SidebarHeader,
   SidebarInset,
   SidebarMenu,
@@ -45,40 +41,31 @@ interface NavItem {
   match: (path: string) => boolean
 }
 
-interface NavGroup {
-  label: string
-  items: NavItem[]
-}
-
-const groups: NavGroup[] = [
-  {
-    label: 'Monitor',
-    items: [
-      { label: 'Overview', to: '/', icon: LayoutDashboard, match: p => p === '/' },
-      { label: 'Calls', to: '/calls', icon: Phone, match: p => p.startsWith('/calls') },
-      { label: 'Recommendations', to: '/recommendations', icon: ListChecks, match: p => p.startsWith('/recommendations') }
-    ]
-  },
-  {
-    label: 'Agents',
-    items: [
-      { label: 'Agents', to: '/agents', icon: Users, match: p => p === '/agents' || (p.startsWith('/agents/') && !p.startsWith('/agents/new')) },
-      { label: 'New agent', to: '/agents/new', icon: PlusCircle, match: p => p.startsWith('/agents/new') }
-    ]
-  }
+/**
+ * Operator nav is deliberately minimal: the two surfaces an operator actually
+ * works in — Call logs and Agents. Overview / Recommendations / the create-agent
+ * flow were removed (read/mirror product, no authoring). Settings stays in the
+ * footer because it configures the analysis engine (provider/keys).
+ */
+const items: NavItem[] = [
+  { label: 'Call logs', to: '/calls', icon: Phone, match: p => p.startsWith('/calls') },
+  { label: 'Agents', to: '/agents', icon: Users, match: p => p.startsWith('/agents') }
 ]
 
 const settingsActive = computed(() => route.path.startsWith('/settings'))
 </script>
 
 <template>
-  <SidebarProvider>
+  <SidebarProvider :default-open="false">
     <Sidebar
       collapsible="icon"
       class="border-r"
     >
       <SidebarHeader class="p-3">
-        <div class="flex items-center gap-2.5 px-1 py-1">
+        <NuxtLink
+          to="/agents"
+          class="flex items-center gap-2.5 rounded-md px-1 py-1 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+        >
           <div class="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground elevation-1">
             <AudioLines class="size-5" />
           </div>
@@ -86,19 +73,15 @@ const settingsActive = computed(() => route.path.startsWith('/settings'))
             <span class="text-sm font-semibold tracking-tight">Voice AI Copilot</span>
             <span class="text-[11px] text-muted-foreground">Observability</span>
           </div>
-        </div>
+        </NuxtLink>
       </SidebarHeader>
 
       <SidebarContent class="px-2">
-        <SidebarGroup
-          v-for="group in groups"
-          :key="group.label"
-        >
-          <SidebarGroupLabel>{{ group.label }}</SidebarGroupLabel>
+        <SidebarGroup>
           <SidebarGroupContent>
             <SidebarMenu>
               <SidebarMenuItem
-                v-for="item in group.items"
+                v-for="item in items"
                 :key="item.label"
               >
                 <SidebarMenuButton

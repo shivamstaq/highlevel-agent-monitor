@@ -1,7 +1,9 @@
+<!-- CREATED (our eval layer) — the shared call list table, bound to the new
+     CallListItem contract (createdAt / callType / flowAdherence). -->
 <script setup lang="ts">
 import type { CallListItem, Severity } from '#shared/types'
 import { computed, ref } from 'vue'
-import { ArrowDown, ArrowUp, ArrowDownUp, ChevronRight, Inbox, PhoneIncoming, PhoneOutgoing } from 'lucide-vue-next'
+import { ArrowDown, ArrowUp, ArrowDownUp, ChevronRight, FlaskConical, Inbox, Radio } from 'lucide-vue-next'
 import {
   Table,
   TableBody,
@@ -10,9 +12,10 @@ import {
   TableHeader,
   TableRow
 } from '~/components/ui/table'
+import { Badge } from '~/components/ui/badge'
 import SeverityBadge from '~/components/SeverityBadge.vue'
 import { useTone } from '~/composables/useTone'
-import { humanizeOutcome, relativeTime as relativeTimeFmt } from '~/lib/format'
+import { relativeTime as relativeTimeFmt } from '~/lib/format'
 import { cn } from '~/lib/utils'
 
 /**
@@ -20,6 +23,11 @@ import { cn } from '~/lib/utils'
  * Used by the Calls inbox (/calls) and the agent detail "Calls needing
  * attention" surface. ~48px comfortable rows, full-row link to /calls/:id,
  * sortable headers with aria-sort, keyboard accessible, empty state.
+ *
+ * Columns come from CallListItem (contract): the call's createdAt, duration,
+ * callType (LIVE|TRIAL), top finding severity, flow conformance, and QA score.
+ * There is no contact/direction/outcome on the call anymore — calls are keyed
+ * by their time + agent + type.
  */
 const props = withDefaults(defineProps<{
   calls: CallListItem[]
@@ -39,8 +47,8 @@ const props = withDefaults(defineProps<{
 
 const { scoreTone } = useTone()
 
-type SortKey = 'contact' | 'agent' | 'outcome' | 'started' | 'findings' | 'severity' | 'score'
-const sortKey = ref<SortKey>('started')
+type SortKey = 'agent' | 'type' | 'created' | 'duration' | 'findings' | 'severity' | 'conformance' | 'score'
+const sortKey = ref<SortKey>('created')
 const sortAsc = ref(false)
 
 function toggleSort(key: SortKey) {
@@ -49,7 +57,7 @@ function toggleSort(key: SortKey) {
   } else {
     sortKey.value = key
     // text columns default A→Z; numeric/time default high→recent first
-    sortAsc.value = key === 'contact' || key === 'agent' || key === 'outcome'
+    sortAsc.value = key === 'agent' || key === 'type'
   }
 }
 
@@ -66,21 +74,21 @@ const rows = computed(() => {
     let av: number | string
     let bv: number | string
     switch (sortKey.value) {
-      case 'contact':
-        av = (a.call.contactName ?? '').toLowerCase()
-        bv = (b.call.contactName ?? '').toLowerCase()
-        break
       case 'agent':
         av = a.agentName.toLowerCase()
         bv = b.agentName.toLowerCase()
         break
-      case 'outcome':
-        av = (a.call.outcome ?? '').toLowerCase()
-        bv = (b.call.outcome ?? '').toLowerCase()
+      case 'type':
+        av = a.call.callType
+        bv = b.call.callType
         break
-      case 'started':
-        av = new Date(a.call.startedAt).getTime()
-        bv = new Date(b.call.startedAt).getTime()
+      case 'created':
+        av = new Date(a.call.createdAt).getTime()
+        bv = new Date(b.call.createdAt).getTime()
+        break
+      case 'duration':
+        av = a.call.durationSec
+        bv = b.call.durationSec
         break
       case 'findings':
         av = a.findingCount
@@ -89,6 +97,10 @@ const rows = computed(() => {
       case 'severity':
         av = a.topSeverity ? SEVERITY_RANK[a.topSeverity] : 0
         bv = b.topSeverity ? SEVERITY_RANK[b.topSeverity] : 0
+        break
+      case 'conformance':
+        av = a.flowAdherence ?? -1
+        bv = b.flowAdherence ?? -1
         break
       case 'score':
         av = a.score ?? -1
@@ -116,8 +128,12 @@ function fullTimestamp(iso: string): string {
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleString()
 }
 
-function contactLabel(item: CallListItem): string {
-  return item.call.contactName?.trim() || 'Unknown contact'
+/** m:ss duration label (matches the call header). */
+function fmtDuration(sec: number): string {
+  const total = Math.max(0, Math.round(sec))
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return `${m}:${s.toString().padStart(2, '0')}`
 }
 </script>
 
@@ -127,7 +143,7 @@ function contactLabel(item: CallListItem): string {
     table (it crushed text + smeared headers + forced h-scroll at 390px).
     Instead each call is a 2-line stacked, full-width row — the whole row a
     NuxtLink to /calls/:id with a visible focus ring, no horizontal scroll.
-    At sm+ the data table renders (Direction/Findings/Outcome only at lg).
+    At sm+ the data table renders (Findings/Conformance only at lg).
   -->
   <div class="overflow-hidden rounded-xl border sm:hidden">
     <ul
@@ -144,7 +160,25 @@ function contactLabel(item: CallListItem): string {
         >
           <div class="min-w-0 flex-1">
             <div class="flex items-baseline justify-between gap-2">
-              <span class="truncate text-sm font-medium">{{ contactLabel(item) }}</span>
+              <span class="flex min-w-0 items-center gap-2">
+                <Badge
+                  variant="outline"
+                  :class="cn(
+                    'shrink-0 gap-1 rounded-md px-1.5 py-0 text-[11px] font-medium',
+                    item.call.callType === 'LIVE' ? 'border-primary/40 text-primary' : 'text-muted-foreground'
+                  )"
+                >
+                  <component
+                    :is="item.call.callType === 'LIVE' ? Radio : FlaskConical"
+                    class="size-3"
+                  />
+                  {{ item.call.callType === 'LIVE' ? 'Live' : 'Trial' }}
+                </Badge>
+                <span
+                  v-if="showAgent"
+                  class="truncate text-sm font-medium"
+                >{{ item.agentName }}</span>
+              </span>
               <span
                 v-if="item.score != null"
                 :class="cn('shrink-0 text-sm font-semibold tabular-nums', scoreTone(item.score))"
@@ -155,21 +189,13 @@ function contactLabel(item: CallListItem): string {
               >Not scored</span>
             </div>
             <div class="mt-0.5 flex min-w-0 items-center gap-1.5 text-[12px] text-muted-foreground">
-              <span
-                v-if="showAgent"
-                class="truncate"
-              >{{ item.agentName }}</span>
-              <span
-                v-if="showAgent"
-                aria-hidden="true"
-              >·</span>
               <time
-                :datetime="item.call.startedAt"
+                :datetime="item.call.createdAt"
                 class="shrink-0 tabular-nums"
-              >{{ relativeTime(item.call.startedAt) }}</time>
-              <span
-                aria-hidden="true"
-              >·</span>
+              >{{ relativeTime(item.call.createdAt) }}</time>
+              <span aria-hidden="true">·</span>
+              <span class="shrink-0 tabular-nums">{{ fmtDuration(item.call.durationSec) }}</span>
+              <span aria-hidden="true">·</span>
               <SeverityBadge
                 :severity="item.topSeverity"
                 :subtle="!item.topSeverity"
@@ -203,33 +229,8 @@ function contactLabel(item: CallListItem): string {
       <TableHeader>
         <TableRow class="bg-muted/40 hover:bg-muted/40">
           <TableHead
-            class="w-[22%] min-w-[140px]"
-            :aria-sort="ariaSort('contact')"
-          >
-            <button
-              type="button"
-              class="flex items-center gap-1 rounded-md font-medium focus-visible:outline-2 focus-visible:outline-primary"
-              @click="toggleSort('contact')"
-            >
-              Contact
-              <ArrowUp
-                v-if="sortKey === 'contact' && sortAsc"
-                class="size-3 text-primary"
-              />
-              <ArrowDown
-                v-else-if="sortKey === 'contact'"
-                class="size-3 text-primary"
-              />
-              <ArrowDownUp
-                v-else
-                class="size-3 text-muted-foreground"
-              />
-            </button>
-          </TableHead>
-
-          <TableHead
             v-if="showAgent"
-            class="w-[16%] min-w-[120px]"
+            class="w-[22%] min-w-[140px]"
             :aria-sort="ariaSort('agent')"
           >
             <button
@@ -254,21 +255,21 @@ function contactLabel(item: CallListItem): string {
           </TableHead>
 
           <TableHead
-            class="hidden w-[15%] min-w-[120px] lg:table-cell"
-            :aria-sort="ariaSort('outcome')"
+            class="w-[100px]"
+            :aria-sort="ariaSort('type')"
           >
             <button
               type="button"
               class="flex items-center gap-1 rounded-md font-medium focus-visible:outline-2 focus-visible:outline-primary"
-              @click="toggleSort('outcome')"
+              @click="toggleSort('type')"
             >
-              Outcome
+              Type
               <ArrowUp
-                v-if="sortKey === 'outcome' && sortAsc"
+                v-if="sortKey === 'type' && sortAsc"
                 class="size-3 text-primary"
               />
               <ArrowDown
-                v-else-if="sortKey === 'outcome'"
+                v-else-if="sortKey === 'type'"
                 class="size-3 text-primary"
               />
               <ArrowDownUp
@@ -278,26 +279,47 @@ function contactLabel(item: CallListItem): string {
             </button>
           </TableHead>
 
-          <TableHead class="hidden w-[120px] lg:table-cell">
-            Direction
-          </TableHead>
-
           <TableHead
             class="w-[104px]"
-            :aria-sort="ariaSort('started')"
+            :aria-sort="ariaSort('created')"
           >
             <button
               type="button"
               class="flex items-center gap-1 rounded-md font-medium focus-visible:outline-2 focus-visible:outline-primary"
-              @click="toggleSort('started')"
+              @click="toggleSort('created')"
             >
-              Started
+              Created
               <ArrowUp
-                v-if="sortKey === 'started' && sortAsc"
+                v-if="sortKey === 'created' && sortAsc"
                 class="size-3 text-primary"
               />
               <ArrowDown
-                v-else-if="sortKey === 'started'"
+                v-else-if="sortKey === 'created'"
+                class="size-3 text-primary"
+              />
+              <ArrowDownUp
+                v-else
+                class="size-3 text-muted-foreground"
+              />
+            </button>
+          </TableHead>
+
+          <TableHead
+            class="w-[92px]"
+            :aria-sort="ariaSort('duration')"
+          >
+            <button
+              type="button"
+              class="flex items-center gap-1 rounded-md font-medium focus-visible:outline-2 focus-visible:outline-primary"
+              @click="toggleSort('duration')"
+            >
+              Duration
+              <ArrowUp
+                v-if="sortKey === 'duration' && sortAsc"
+                class="size-3 text-primary"
+              />
+              <ArrowDown
+                v-else-if="sortKey === 'duration'"
                 class="size-3 text-primary"
               />
               <ArrowDownUp
@@ -358,6 +380,31 @@ function contactLabel(item: CallListItem): string {
           </TableHead>
 
           <TableHead
+            class="hidden w-[116px] text-right lg:table-cell"
+            :aria-sort="ariaSort('conformance')"
+          >
+            <button
+              type="button"
+              class="ml-auto flex items-center gap-1 rounded-md font-medium focus-visible:outline-2 focus-visible:outline-primary"
+              @click="toggleSort('conformance')"
+            >
+              Flow
+              <ArrowUp
+                v-if="sortKey === 'conformance' && sortAsc"
+                class="size-3 text-primary"
+              />
+              <ArrowDown
+                v-else-if="sortKey === 'conformance'"
+                class="size-3 text-primary"
+              />
+              <ArrowDownUp
+                v-else
+                class="size-3 text-muted-foreground"
+              />
+            </button>
+          </TableHead>
+
+          <TableHead
             class="w-[96px] text-right"
             :aria-sort="ariaSort('score')"
           >
@@ -392,69 +439,62 @@ function contactLabel(item: CallListItem): string {
           :key="item.call.id"
           :class="cn('group relative cursor-pointer', rowHeight)"
         >
-          <TableCell class="max-w-0">
+          <TableCell
+            v-if="showAgent"
+            class="max-w-0"
+          >
             <!--
               R3-06: full-row click-through via a stretched-link overlay. ONE
               NuxtLink per row (one tab stop, keyboard + SR reachable) is
               absolutely positioned to cover the entire row; its focus-visible
-              ring draws on the whole row. Cells with their own interactive
-              content (none here) would need relative+z to sit above it.
+              ring draws on the whole row.
             -->
             <NuxtLink
               :to="`/calls/${item.call.id}`"
-              :aria-label="`Open call · ${contactLabel(item)}`"
+              :aria-label="`Open call · ${item.agentName} · ${relativeTime(item.call.createdAt)}`"
               class="absolute inset-0 z-0 rounded-md focus-visible:outline-2 focus-visible:outline-primary -outline-offset-2"
             />
             <span
               class="block truncate font-medium"
-              :title="contactLabel(item)"
-            >{{ contactLabel(item) }}</span>
-          </TableCell>
-
-          <TableCell
-            v-if="showAgent"
-            class="max-w-0 text-muted-foreground"
-          >
-            <span
-              class="block truncate"
               :title="item.agentName"
             >{{ item.agentName }}</span>
           </TableCell>
 
-          <TableCell class="hidden max-w-0 lg:table-cell">
-            <span
-              v-if="item.call.outcome"
-              class="block truncate text-sm"
-              :title="humanizeOutcome(item.call.outcome)"
-            >{{ humanizeOutcome(item.call.outcome) }}</span>
-            <span
-              v-else
-              class="text-sm text-muted-foreground"
-            >—</span>
-          </TableCell>
-
-          <TableCell class="hidden lg:table-cell">
-            <span class="inline-flex items-center gap-1.5 text-sm text-muted-foreground">
-              <PhoneIncoming
-                v-if="item.call.direction === 'inbound'"
-                class="size-3.5"
+          <TableCell :class="cn('relative', !showAgent && 'pl-4')">
+            <!-- When the agent column is hidden, the stretched link lives here. -->
+            <NuxtLink
+              v-if="!showAgent"
+              :to="`/calls/${item.call.id}`"
+              :aria-label="`Open call · ${relativeTime(item.call.createdAt)}`"
+              class="absolute inset-0 z-0 rounded-md focus-visible:outline-2 focus-visible:outline-primary -outline-offset-2"
+            />
+            <Badge
+              variant="outline"
+              :class="cn(
+                'gap-1 rounded-md text-[12px] font-medium',
+                item.call.callType === 'LIVE' ? 'border-primary/40 text-primary' : 'text-muted-foreground'
+              )"
+            >
+              <component
+                :is="item.call.callType === 'LIVE' ? Radio : FlaskConical"
+                class="size-3"
               />
-              <PhoneOutgoing
-                v-else
-                class="size-3.5"
-              />
-              {{ item.call.direction === 'inbound' ? 'Inbound' : 'Outbound' }}
-            </span>
+              {{ item.call.callType === 'LIVE' ? 'Live' : 'Trial' }}
+            </Badge>
           </TableCell>
 
           <TableCell class="text-muted-foreground">
             <time
-              :datetime="item.call.startedAt"
-              :title="fullTimestamp(item.call.startedAt)"
+              :datetime="item.call.createdAt"
+              :title="fullTimestamp(item.call.createdAt)"
               class="text-sm tabular-nums"
             >
-              {{ relativeTime(item.call.startedAt) }}
+              {{ relativeTime(item.call.createdAt) }}
             </time>
+          </TableCell>
+
+          <TableCell class="text-muted-foreground tabular-nums">
+            {{ fmtDuration(item.call.durationSec) }}
           </TableCell>
 
           <TableCell class="hidden text-right tabular-nums lg:table-cell">
@@ -468,6 +508,17 @@ function contactLabel(item: CallListItem): string {
               :severity="item.topSeverity"
               :subtle="!item.topSeverity"
             />
+          </TableCell>
+
+          <TableCell class="hidden text-right tabular-nums lg:table-cell">
+            <span
+              v-if="item.flowAdherence != null"
+              :class="cn('font-medium', scoreTone(item.flowAdherence))"
+            >{{ Math.round(item.flowAdherence) }}</span>
+            <span
+              v-else
+              class="text-sm text-muted-foreground"
+            >—</span>
           </TableCell>
 
           <TableCell class="text-right tabular-nums">

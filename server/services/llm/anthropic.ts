@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk'
-import type { LLMCompleteOptions, LLMProvider } from './types'
+import type { LLMProvider, LLMRequest, LLMResult } from './types'
 
 /**
  * Anthropic provider (per the claude-api skill).
@@ -10,10 +10,17 @@ import type { LLMCompleteOptions, LLMProvider } from './types'
  * output schema, then force the model to call it with `tool_choice`. The tool's
  * `input` is the structured result.
  *
- * Model id comes from runtimeConfig.anthropicModel (default 'claude-opus-4-8').
- * For Opus 4.8 the `thinking` parameter is omitted entirely — the model accepts
- * that, and `thinking: {type:"enabled", budget_tokens}` (the only on-mode this
- * SDK version types) would be rejected with a 400.
+ * R2 changes:
+ *  - `generate(req)` is the unified entry point: per-request `model` + `maxTokens`
+ *    (resolved by the seam from getLlmConfig + the PromptSpec), `mode` (tool|json),
+ *    and a returned `usage` envelope.
+ *  - Prompt caching: the stable system prefix is marked `cache_control` so the
+ *    heavy agent-prompt/flow/vocabulary prefix is billed at cache-read rates and
+ *    only the per-call transcript varies.
+ *  - Haiku takes NO `effort`/`thinking` param — we never send one (the SDK's only
+ *    typed thinking on-mode would 400 on Haiku 4.5 and on Opus/Sonnet here too).
+ *
+ * The model id and key come from the unified request / config layer.
  */
 export class AnthropicProvider implements LLMProvider {
   readonly name = 'anthropic'
@@ -26,23 +33,35 @@ export class AnthropicProvider implements LLMProvider {
     this.model = model
   }
 
-  async complete(opts: LLMCompleteOptions): Promise<unknown> {
-    const toolName = sanitizeToolName(opts.schemaName)
+  async generate(req: LLMRequest): Promise<LLMResult> {
+    const toolName = sanitizeToolName(req.schemaName)
 
     const message = await this.client.messages.create({
-      model: this.model,
-      max_tokens: 16000,
-      system: opts.system,
+      model: req.model || this.model,
+      max_tokens: req.maxTokens,
+      // Cache the stable system prefix (agent prompt / flow / vocabulary).
+      system: [
+        {
+          type: 'text',
+          text: req.system,
+          cache_control: { type: 'ephemeral' }
+        }
+      ],
       tools: [
         {
           name: toolName,
-          description: `Emit the result strictly matching the ${opts.schemaName} schema.`,
-          input_schema: opts.schema as Anthropic.Tool.InputSchema
+          description: `Emit the result strictly matching the ${req.schemaName} schema.`,
+          input_schema: req.jsonSchema as Anthropic.Tool.InputSchema
         }
       ],
       tool_choice: { type: 'tool', name: toolName },
-      messages: [{ role: 'user', content: opts.user }]
+      messages: [{ role: 'user', content: req.user }]
     })
+
+    const usage: LLMResult['usage'] = {
+      input: message.usage.input_tokens,
+      output: message.usage.output_tokens
+    }
 
     const toolUse = message.content.find(
       (block): block is Anthropic.ToolUseBlock => block.type === 'tool_use'
@@ -50,7 +69,7 @@ export class AnthropicProvider implements LLMProvider {
     if (!toolUse) {
       throw new Error('Anthropic returned no tool_use block')
     }
-    return toolUse.input
+    return { toolInput: toolUse.input, usage }
   }
 }
 

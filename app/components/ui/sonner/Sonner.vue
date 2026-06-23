@@ -3,6 +3,10 @@ import type { ToasterProps } from 'vue-sonner'
 import { CircleCheckIcon, InfoIcon, Loader2Icon, OctagonXIcon, TriangleAlertIcon, XIcon } from '@lucide/vue'
 import { Toaster as Sonner } from 'vue-sonner'
 import { cn } from '~/lib/utils'
+// vue-sonner ships its base styles separately; without this the toasts render
+// unstyled (rich-colors + the CSS-var theming below only take effect once the
+// package's base stylesheet is loaded).
+import 'vue-sonner/style.css'
 
 const props = defineProps<ToasterProps>()
 </script>

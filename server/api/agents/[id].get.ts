@@ -1,26 +1,35 @@
 /**
- * GET /api/agents/:id -> { health, calls, recommendations }
+ * GET /api/agents/:id -> { agent, health, calls, recommendations, inferredFlow,
+ * criteriaScorecard }
  *
- * One agent's health summary, its calls as list-items (newest first), and the
- * deduped recommendations across that agent's analyzed calls. 404 if the agent
- * does not exist.
+ * One agent's enriched record, aggregate health, its calls as list-items (newest
+ * first), the deduped recurring recommendations, the LLM-inferred intended call
+ * flow, and a per-criterion aggregate scorecard. 404 if the agent doesn't exist.
  */
-import { getAgent, getAnalysis, listCalls } from '../../services/db'
+import { getAgent, getAnalysis, getCallsIndex } from '../../services/db'
+import { getCachedInferredFlow } from '../../services/eval/inferredFlow'
 import { computeAgentHealth, toCallListItem, topRecommendations } from '../../utils/rollup'
-import type { AgentHealth, Analysis, Call, CallListItem, FlowNodeKind, RecommendationItem } from '#shared/types'
+import type { Agent, AgentHealth, Analysis, Call, CallListItem, InferredFlow, RecommendationItem } from '#shared/types'
 
-/** Aggregate flow-conformance drift across an agent's analyzed calls (the flywheel signal). */
-export interface FlowDriftSummary {
-  avgConformance: number | null
+/** One criterion's aggregate performance across the agent's analyzed calls. */
+export interface CriterionAggregate {
+  criterionId: string
+  label: string
+  kind: string
+  /** Mean score 0–100 over calls that scored this criterion (null if none). */
+  avgScore: number | null
+  /** Pass rate 0–1 (criterion `met`) over scored calls (null if none). */
+  metRate: number | null
   callsScored: number
-  nodes: { nodeId: string, label: string, kind: FlowNodeKind, skipRate: number, driftRate: number }[]
 }
 
 export default defineEventHandler(async (event): Promise<{
+  agent: Agent
   health: AgentHealth
   calls: CallListItem[]
   recommendations: RecommendationItem[]
-  flowSummary: FlowDriftSummary
+  inferredFlow: InferredFlow | null
+  criteriaScorecard: CriterionAggregate[]
 }> => {
   const id = getRouterParam(event, 'id')
   if (!id) {
@@ -32,7 +41,13 @@ export default defineEventHandler(async (event): Promise<{
     throw createError({ statusCode: 404, statusMessage: `Agent ${id} not found` })
   }
 
-  const calls = await listCalls({ agentId: id })
+  // HOT READ PATH: read the calls from the getItem-based `index:calls` and filter
+  // in memory by agentId — NEVER getKeys/list (which would hit the free-tier KV
+  // list quota and 500). Per-call analyses are single getItem reads (fine).
+  const callsIndex = await getCallsIndex()
+  const calls = Object.values(callsIndex.calls)
+    .filter(c => c.agentId === id)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
   const analyses = await Promise.all(calls.map(c => getAnalysis(c.id)))
 
   const analysesByCallId = new Map<string, Analysis>()
@@ -42,50 +57,40 @@ export default defineEventHandler(async (event): Promise<{
 
   const health = computeAgentHealth(agent, calls, analysesByCallId)
   const callItems = calls.map(call =>
-    toCallListItem(call, agent.name, analysesByCallId.get(call.id) ?? null)
+    toCallListItem(call, agent.ghl.agentName, analysesByCallId.get(call.id) ?? null)
   )
   const callsById = new Map<string, Call>(calls.map(c => [c.id, c]))
   const recommendations = topRecommendations(
     [...analysesByCallId.values()],
     6,
-    { agentsById: new Map([[agent.id, agent]]), callsById }
+    { agentsById: new Map([[agent.ghl.id, agent]]), callsById }
   )
-  const flowSummary = summarizeFlowDrift([...analysesByCallId.values()])
+  const criteriaScorecard = aggregateCriteria(agent, [...analysesByCallId.values()])
+  const inferredFlow = await getCachedInferredFlow(id)
 
-  return { health, calls: callItems, recommendations, flowSummary }
+  return { agent, health, calls: callItems, recommendations, inferredFlow, criteriaScorecard }
 })
 
-/** Per-node skip/drift rates over the agent's analyzed calls. */
-function summarizeFlowDrift(analyses: Analysis[]): FlowDriftSummary {
-  const scored = analyses.filter(a => a.flowAlignment)
-  if (scored.length === 0) return { avgConformance: null, callsScored: 0, nodes: [] }
-
-  const avgConformance = Math.round(
-    scored.reduce((s, a) => s + (a.flowAlignment!.conformanceScore), 0) / scored.length
-  )
-
-  const agg = new Map<string, { label: string, kind: FlowNodeKind, skipped: number, drifted: number, total: number }>()
-  for (const a of scored) {
-    for (const n of a.flowAlignment!.nodeAlignments) {
-      if (!n.nodeId) continue
-      const cur = agg.get(n.nodeId) ?? { label: n.label, kind: n.kind, skipped: 0, drifted: 0, total: 0 }
-      cur.total++
-      if (n.status === 'skipped' && n.driftScore > 0) cur.skipped++
-      if (n.driftScore > 0) cur.drifted++
-      agg.set(n.nodeId, cur)
+/** Per-criterion mean score + pass rate across the agent's analyzed calls. */
+function aggregateCriteria(agent: Agent, analyses: Analysis[]): CriterionAggregate[] {
+  return agent.successCriteria.map((c) => {
+    let sum = 0
+    let met = 0
+    let count = 0
+    for (const a of analyses) {
+      const cs = a.scorecard.perCriterion.find(p => p.criterionId === c.id)
+      if (!cs) continue
+      sum += cs.score
+      if (cs.met) met += 1
+      count += 1
     }
-  }
-
-  const nodes = [...agg.entries()]
-    .map(([nodeId, v]) => ({
-      nodeId,
-      label: v.label,
-      kind: v.kind,
-      skipRate: v.total ? v.skipped / v.total : 0,
-      driftRate: v.total ? v.drifted / v.total : 0
-    }))
-    .filter(n => n.driftRate > 0)
-    .sort((a, b) => b.driftRate - a.driftRate)
-
-  return { avgConformance, callsScored: scored.length, nodes }
+    return {
+      criterionId: c.id,
+      label: c.label,
+      kind: c.kind,
+      avgScore: count ? Math.round(sum / count) : null,
+      metRate: count ? met / count : null,
+      callsScored: count
+    }
+  })
 }

@@ -1,5 +1,11 @@
+<!-- CREATED (our eval layer) — the signature "Voice Pipeline Timeline".
+     HONESTY (contract source:'partial-real'): the headline response latency +
+     per-turn latencies are REAL (derived from GHL transcript turn times); the
+     per-stage VAD/STT/EOU/LLM/TTS sub-stage events are MODELED and flagged as
+     such (CallEvent.provenance). Color never decorates — it marks WHERE LATENCY
+     IS SPENT and which segments are modeled vs measured. -->
 <script setup lang="ts">
-import type { CallEvent, CallTimeline, Stage } from '#shared/types'
+import type { CallEvent, CallTimeline, TimelineStage } from '#shared/types'
 import { computed } from 'vue'
 import { Info } from 'lucide-vue-next'
 import { Badge } from '~/components/ui/badge'
@@ -13,42 +19,20 @@ import {
 import { useTone } from '~/composables/useTone'
 import { cn } from '~/lib/utils'
 
-/**
- * CallTimeline — the app's signature "Voice Pipeline Timeline".
- *
- * Renders standalone: the host page wraps it in a <SectionCard
- * title="Voice pipeline timeline">, so this component adds NO outer card or
- * title of its own. It renders only the KPI strip + the fluid SVG gantt +
- * legend.
- *
- * Color discipline — color encodes WHERE LATENCY IS SPENT, not decoration:
- *   · Non-cost lanes (caller / STT / VAD / agent) are low-chroma: neutral
- *     borders for the human-speech lanes, faint teal tint for the system
- *     listening lanes (STT/VAD). They recede.
- *   · Cost lanes (EOU / LLM / TTS) + interruptions carry the only saturated
- *     ink, routed through the --warning / --danger semantic tokens, so the eye
- *     lands on the stages that actually cost time. P30: a cost segment is toned
- *     by its OWN latencyMs vs its modeled budget — within budget = muted warning,
- *     over budget = saturated danger — so saturation tracks the real spend on
- *     THIS call, not a static per-stage hue.
- *
- * All status color routes through tokens (no raw emerald-/amber-/red utilities).
- * Motion is gated behind motion-safe + the global prefers-reduced-motion rule.
- */
 const props = defineProps<{
   timeline: CallTimeline
+  /** The active transcript ENTRY idx — rings the matching segment. */
   activeTurnIdx?: number | null
   /**
-   * The call's TRUE wall-clock duration (Call.durationSec). The modeled timeline
-   * is rescaled server-side so totalMs ≈ durationSec*1000, but the "Pipeline span"
-   * KPI renders this real value formatted exactly like the call header (m:ss) so
-   * the two never contradict (P05). Optional: falls back to totalMs when absent.
+   * The call's TRUE wall-clock duration (Call.durationSec). The "Pipeline span"
+   * KPI renders this real value formatted m:ss (matching the call header) so the
+   * two never contradict (P05). Falls back to totalMs when absent.
    */
   durationSec?: number
 }>()
 
 const emit = defineEmits<{
-  (e: 'selectTurn', turnIdx: number): void
+  (e: 'selectTurn', entryIdx: number): void
 }>()
 
 const { toneClasses } = useTone()
@@ -57,11 +41,10 @@ const { toneClasses } = useTone()
  * Lane definitions — render order top->bottom. 'interruption' is NOT a lane;
  * it renders as full-height vertical ticks across the chart.
  *
- * `fill` / `lane` are CSS custom-property references resolved on the <svg>
- * wrapper from semantic tokens — never raw palette utilities. Cost lanes carry
- * saturated warning/danger ink; non-cost lanes are low-chroma neutral/teal.
+ * Cost lanes (EOU / LLM / TTS) + interruptions carry the only saturated ink,
+ * routed through --warning / --danger; non-cost lanes are low-chroma.
  * ------------------------------------------------------------------------- */
-type LaneStage = Exclude<Stage, 'interruption'>
+type LaneStage = Exclude<TimelineStage, 'interruption'>
 
 interface LaneDef {
   stage: LaneStage
@@ -75,23 +58,16 @@ interface LaneDef {
 }
 
 const LANES: LaneDef[] = [
-  // Non-cost: human speech = neutral; system listening (STT/VAD) = faint teal.
   { stage: 'user_speech', label: 'Caller', fill: 'var(--cl-neutral)', lane: 'var(--cl-neutral-soft)', cost: false },
   { stage: 'stt', label: 'STT', fill: 'var(--cl-listen)', lane: 'var(--cl-listen-soft)', cost: false },
   { stage: 'vad', label: 'VAD', fill: 'var(--cl-listen)', lane: 'var(--cl-listen-soft)', cost: false },
-  // Cost lanes: lane bg is faint warning; the SEGMENT fill is resolved per event
-  // from latency-vs-budget (segFill), so saturation tracks real spend not stage.
   { stage: 'eou', label: 'Endpoint (EOU)', fill: 'var(--cl-warning)', lane: 'var(--cl-warning-soft)', cost: true },
   { stage: 'llm', label: 'LLM', fill: 'var(--cl-warning)', lane: 'var(--cl-warning-soft)', cost: true },
   { stage: 'tts', label: 'TTS', fill: 'var(--cl-warning)', lane: 'var(--cl-warning-soft)', cost: true },
-  // Agent speech = neutral again (the output, not a cost).
   { stage: 'agent_speech', label: 'Agent', fill: 'var(--cl-neutral)', lane: 'var(--cl-neutral-soft)', cost: false }
 ]
 
-/**
- * Token-backed CSS variables for the chart. Resolved once on the SVG wrapper
- * style so every <rect>/<line> reads a semantic token (not a raw palette hue).
- */
+/** Token-backed CSS variables for the chart (resolved on the SVG wrapper). */
 const chartVars = {
   '--cl-neutral': 'var(--muted-foreground)',
   '--cl-neutral-soft': 'color-mix(in oklch, var(--muted-foreground) 8%, transparent)',
@@ -99,7 +75,6 @@ const chartVars = {
   '--cl-listen-soft': 'color-mix(in oklch, var(--primary) 7%, transparent)',
   '--cl-warning': 'var(--warning)',
   '--cl-warning-soft': 'color-mix(in oklch, var(--warning) 10%, transparent)',
-  // Cost segment WITHIN budget: low-chroma warning (recedes, but still a cost cue).
   '--cl-cost-ok': 'color-mix(in oklch, var(--warning) 60%, var(--muted-foreground))',
   '--cl-danger': 'var(--danger)',
   '--cl-danger-soft': 'color-mix(in oklch, var(--danger) 10%, transparent)'
@@ -108,11 +83,9 @@ const chartVars = {
 const LANE_INDEX = new Map<string, number>(LANES.map((l, i) => [l.stage, i]))
 
 /* ----------------------------------------------------------------------------
- * Per-cost-stage modeled budgets (LiveKit-published means, mirrored in the
- * Modeled-timing popover). P30: cost-lane saturation is DATA-DRIVEN — a cost
- * segment within its budget stays low-chroma warning; one OVER budget escalates
- * to saturated danger ink. So color encodes "where THIS call spent time over its
- * budget", not a static EOU=amber / LLM=red decoration-by-category.
+ * Per-cost-stage MODELED budgets (LiveKit-published means, mirrored in the
+ * Modeled-timing popover). Cost-lane saturation is DATA-DRIVEN — within budget
+ * stays low-chroma; over budget escalates to saturated danger ink.
  * ------------------------------------------------------------------------- */
 const COST_BUDGET_MS: Partial<Record<LaneStage, number>> = {
   eou: 550, // end-of-utterance turn detector
@@ -128,16 +101,14 @@ function isOverBudget(ev: CallEvent): boolean {
 }
 
 /* ----------------------------------------------------------------------------
- * Geometry — SVG uses a viewBox so it scales fluidly. x maps to a fixed unit
- * width; y is fixed per lane. The lane-label gutter is baked into the viewBox
- * so rows stay pixel-aligned at every width.
+ * Geometry — SVG uses a viewBox so it scales fluidly.
  * ------------------------------------------------------------------------- */
-const GUTTER_W = 96 // logical units reserved on the left for lane labels
-const PLOT_W = 1000 // logical x units mapped to totalMs
-const VB_W = GUTTER_W + PLOT_W + 8 // +8 right pad so end-of-call ticks aren't clipped
+const GUTTER_W = 96
+const PLOT_W = 1000
+const VB_W = GUTTER_W + PLOT_W + 8
 const LANE_H = 34
 const LANE_GAP = 4
-const TOP_PAD = 26 // room for the time axis labels
+const TOP_PAD = 26
 const BOT_PAD = 6
 
 const chartH = computed(() => LANES.length * (LANE_H + LANE_GAP) - LANE_GAP)
@@ -155,7 +126,7 @@ function laneY(stage: string): number {
 }
 
 /* ----------------------------------------------------------------------------
- * Time axis ticks — aim for ~1s spacing, but adapt step so we don't overcrowd.
+ * Time axis ticks — aim for ~1s spacing, adapt step so we don't overcrowd.
  * ------------------------------------------------------------------------- */
 const ticks = computed(() => {
   const total = totalMs.value
@@ -194,20 +165,16 @@ interface Segment {
   w: number
   y: number
   active: boolean
-  /** Cost segment over its modeled budget — drives saturated danger fill (P30). */
+  /** Cost segment over its modeled budget — drives saturated danger fill. */
   over: boolean
+  /** This sub-stage event is MODELED (not measured) — drives the dashed key. */
+  modeled: boolean
   /** Resolved segment fill: within-budget cost = muted warning; over = danger. */
   fill: string
 }
 
-const MIN_SEG_W = 3 // logical units so a 0-width latency marker is still visible
+const MIN_SEG_W = 3
 
-/**
- * Per-segment fill (P30). Non-cost lanes keep their lane fill. Cost lanes are
- * data-driven: within budget = a muted warning ink (low saturation, recedes),
- * over budget = saturated danger ink — so the eye lands on the stages that
- * actually overspent on THIS call.
- */
 function segFill(ev: CallEvent, lane: LaneDef): string {
   if (!lane.cost) return lane.fill
   return isOverBudget(ev) ? 'var(--cl-danger)' : 'var(--cl-cost-ok)'
@@ -230,9 +197,10 @@ const segments = computed<Segment[]>(() => {
       y: laneY(ev.stage),
       active:
         props.activeTurnIdx != null
-        && ev.turnIdx != null
-        && ev.turnIdx === props.activeTurnIdx,
+        && ev.entryIdx != null
+        && ev.entryIdx === props.activeTurnIdx,
       over: lane.cost && isOverBudget(ev),
+      modeled: ev.provenance === 'modeled',
       fill: segFill(ev, lane)
     })
   }
@@ -258,13 +226,6 @@ const avgTone = computed(() => {
   return toneClasses('danger')
 })
 
-/**
- * Pipeline span (P05). The modeled timeline is rescaled so totalMs ≈ the call's
- * real durationSec*1000, but we render the call's TRUE durationSec (when passed)
- * formatted as m:ss — IDENTICAL to the call header — so the showpiece never
- * contradicts the header (no 46.0s-vs-4:18). Falls back to totalMs only when the
- * host doesn't pass durationSec.
- */
 const spanSec = computed(() =>
   props.durationSec != null && props.durationSec > 0
     ? props.durationSec
@@ -279,27 +240,39 @@ const spanLabel = computed(() => {
 })
 
 /**
- * Headline per-stage p50 chips — exactly the COST stages so "where time is
- * spent" reads cleanly (P30). STT (a non-cost lane) is intentionally NOT a chip;
- * the e2e chip closes the identity e2e ≈ EOU + TTFT + TTFB.
+ * Headline per-stage p50 chips — the COST stages so "where time is spent" reads
+ * cleanly. Derived from the MODELED sub-stage events (median latency per cost
+ * stage). The e2e chip is REAL (avgResponseLatencyMs).
  */
 const stageChips = computed(() => {
-  const wanted: { stage: Stage, label: string }[] = [
+  const wanted: { stage: LaneStage, label: string }[] = [
     { stage: 'eou', label: 'EOU' },
     { stage: 'llm', label: 'LLM TTFT' },
     { stage: 'tts', label: 'TTS TTFB' }
   ]
-  const byStage = new Map(props.timeline.perStageLatency.map(s => [s.stage, s]))
+  const byStage = new Map<string, number[]>()
+  for (const ev of props.timeline.events) {
+    if (ev.latencyMs == null) continue
+    const arr = byStage.get(ev.stage) ?? []
+    arr.push(ev.latencyMs)
+    byStage.set(ev.stage, arr)
+  }
+  function p50(values: number[]): number {
+    if (!values.length) return 0
+    const sorted = [...values].sort((a, b) => a - b)
+    return sorted[Math.floor((sorted.length - 1) / 2)] ?? 0
+  }
   const chips = wanted
-    .map(w => ({ ...w, lat: byStage.get(w.stage) }))
-    .filter(c => c.lat && c.lat.count > 0)
-    .map(c => ({ label: c.label, p50: Math.round(c.lat!.p50Ms) }))
-  // e2e: the headline boundary metric (caller stops → agent speaks).
-  if (avgMs.value > 0) chips.push({ label: 'e2e', p50: avgMs.value })
+    .map(w => ({ ...w, vals: byStage.get(w.stage) ?? [] }))
+    .filter(c => c.vals.length > 0)
+    .map(c => ({ label: c.label, p50: Math.round(p50(c.vals)), modeled: true }))
+  // e2e: the REAL headline boundary metric (caller stops → agent speaks).
+  if (avgMs.value > 0) chips.push({ label: 'e2e', p50: avgMs.value, modeled: false })
   return chips
 })
 
-const isModeled = computed(() => props.timeline.source === 'modeled')
+/** Count of measured per-turn latencies (REAL) — credibility anchor. */
+const realTurnCount = computed(() => props.timeline.perTurnLatency.length)
 
 /* ----------------------------------------------------------------------------
  * Formatting helpers for tooltips
@@ -320,7 +293,7 @@ function segLabel(s: Segment): string {
           ? 'TTFT'
           : ev.stage === 'tts'
             ? 'TTFB'
-            : ev.type
+            : 'latency'
     const budget = COST_BUDGET_MS[ev.stage as LaneStage]
     const verdict = budget != null
       ? ` (${s.over ? 'over' : 'within'} ${fmtDur(budget)} budget)`
@@ -328,20 +301,20 @@ function segLabel(s: Segment): string {
     return `${lane} ${kind}: ${fmtDur(ev.latencyMs)}${verdict}`
   }
   const dur = ev.tEndMs - ev.tStartMs
-  const verb = ev.stage === 'user_speech' || ev.stage === 'agent_speech' ? 'speech' : ev.type
+  const verb = ev.stage === 'user_speech' || ev.stage === 'agent_speech' ? 'speech' : 'window'
   return `${lane} ${verb}: ${fmtDur(dur)}`
 }
 
 function onSegClick(s: Segment) {
-  if (s.ev.turnIdx != null) emit('selectTurn', s.ev.turnIdx)
+  if (s.ev.entryIdx != null) emit('selectTurn', s.ev.entryIdx)
 }
 
 /** Keyboard activation for an interactive segment (Enter / Space). */
 function onSegKey(e: KeyboardEvent, s: Segment) {
-  if (s.ev.turnIdx == null) return
+  if (s.ev.entryIdx == null) return
   if (e.key === 'Enter' || e.key === ' ') {
     e.preventDefault()
-    emit('selectTurn', s.ev.turnIdx)
+    emit('selectTurn', s.ev.entryIdx)
   }
 }
 </script>
@@ -352,11 +325,19 @@ function onSegKey(e: KeyboardEvent, s: Segment) {
       class="flex flex-col gap-4"
       :style="chartVars"
     >
-      <!-- Honesty flag + KPI strip -->
+      <!-- Honesty flag + KPI strip. source is always 'partial-real': REAL turn
+           latency + MODELED sub-stages. -->
       <div class="flex flex-col gap-3">
-        <div class="flex items-center justify-end">
-          <!-- Modeled-timing honesty popover (credibility asset — kept) -->
-          <Popover v-if="isModeled">
+        <div class="flex items-center justify-end gap-2">
+          <Badge
+            variant="outline"
+            :class="cn('gap-1', toneClasses('success').badge, 'border-success/40')"
+          >
+            <span class="size-1.5 rounded-full bg-success" />
+            Real turn latency (HighLevel)
+          </Badge>
+          <!-- Modeled sub-stage honesty popover (credibility asset). -->
+          <Popover>
             <PopoverTrigger as-child>
               <button
                 type="button"
@@ -367,7 +348,7 @@ function onSegKey(e: KeyboardEvent, s: Segment) {
                   :class="cn('gap-1', toneClasses('warning').badge, 'border-warning/40')"
                 >
                   <Info class="size-3" />
-                  Modeled timing
+                  Modeled sub-stages
                 </Badge>
               </button>
             </PopoverTrigger>
@@ -376,38 +357,30 @@ function onSegKey(e: KeyboardEvent, s: Segment) {
               align="end"
             >
               <p class="mb-2 text-sm font-semibold text-foreground">
-                Stage latencies are modeled, not measured.
+                Per-stage timings are modeled, not measured.
               </p>
               <p class="text-muted-foreground">
-                HighLevel's Voice AI API does not expose per-stage latency. Stage
-                timings are modeled on published LiveKit budgets — end-of-utterance
-                <span class="font-medium text-foreground">~550ms</span> (turn
-                detector), LLM TTFT
+                The headline response latency and the
+                <span class="font-medium text-foreground">{{ realTurnCount }}</span>
+                per-turn latencies below are <span class="font-medium text-foreground">REAL</span> —
+                derived from HighLevel's transcript turn times (caller stops →
+                agent speaks). HighLevel does not expose the per-stage
+                VAD/STT/EOU/LLM/TTS breakdown, so those sub-stage bars are
+                <span class="font-medium text-foreground">modeled</span> on published
+                LiveKit budgets — end-of-utterance
+                <span class="font-medium text-foreground">~550ms</span>, LLM TTFT
                 <span class="font-medium text-foreground">~420ms</span>, TTS TTFB
-                <span class="font-medium text-foreground">~180ms</span>; identity
-                e2e &asymp; EOU + TTFT + TTFB, target &lt; 1s. Turn boundaries derive
-                from the transcript; deterministic per call.
-              </p>
-              <p class="mt-2 font-mono text-[11px] text-muted-foreground">
-                model {{ timeline.modelVersion }}
+                <span class="font-medium text-foreground">~180ms</span>; e2e &lt; 1s
+                target — and rescaled to this call's real length. Modeled bars carry
+                a dashed outline.
               </p>
             </PopoverContent>
           </Popover>
-
-          <Badge
-            v-else
-            variant="outline"
-            :class="cn('gap-1', toneClasses('success').badge, 'border-success/40')"
-          >
-            <span class="size-1.5 rounded-full bg-success" />
-            Real timing (HighLevel)
-          </Badge>
         </div>
 
         <div class="flex flex-wrap items-stretch gap-2">
-          <!-- Headline: response latency at the HONEST boundary (P06).
-             Labeled by what is actually measured (caller stops → agent speaks),
-             which spans VAD+EOU+TTFT+TTFB — not just EOU→first audio. -->
+          <!-- Headline: REAL response latency at the honest boundary (caller
+               stops → agent speaks). -->
           <div
             class="flex min-w-[16rem] flex-1 flex-col gap-0.5 rounded-md border bg-card px-3 py-2"
           >
@@ -433,8 +406,7 @@ function onSegKey(e: KeyboardEvent, s: Segment) {
             >{{ timeline.interruptionCount }}</span>
           </div>
 
-          <!-- Pipeline span (P05): the call's TRUE duration, formatted m:ss exactly
-             like the call header — never the raw collapsed modeled clock. -->
+          <!-- Pipeline span (P05): the call's TRUE duration, m:ss like the header. -->
           <Tooltip>
             <TooltipTrigger as-child>
               <div class="flex cursor-help flex-col justify-center gap-0.5 rounded-md border bg-card px-3 py-2">
@@ -460,7 +432,11 @@ function onSegKey(e: KeyboardEvent, s: Segment) {
               <span
                 v-for="chip in stageChips"
                 :key="chip.label"
-                class="inline-flex items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 text-[12px] font-medium tabular-nums"
+                :class="cn(
+                  'inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[12px] font-medium tabular-nums',
+                  chip.modeled ? 'border border-dashed bg-muted/60' : 'bg-muted'
+                )"
+                :title="chip.modeled ? 'Modeled sub-stage' : 'Real (measured)'"
               >
                 <span class="text-muted-foreground">{{ chip.label }}</span>
                 <span class="text-foreground">{{ chip.p50 }}ms</span>
@@ -470,15 +446,14 @@ function onSegKey(e: KeyboardEvent, s: Segment) {
         </div>
       </div>
 
-      <!-- Gantt: single fluid SVG (lane-label gutter baked into the viewBox so
-         rows stay pixel-aligned at every width; uniform scaling, no distortion). -->
+      <!-- Gantt: single fluid SVG (lane-label gutter baked into the viewBox). -->
       <div class="min-w-0">
         <svg
           :viewBox="`0 0 ${VB_W} ${VB_H}`"
           class="h-auto w-full overflow-visible"
           preserveAspectRatio="xMinYMin meet"
           role="img"
-          aria-label="Voice pipeline event timeline — color marks the cost stages (endpoint, LLM, TTS) where latency is spent"
+          aria-label="Voice pipeline event timeline — color marks the cost stages (endpoint, LLM, TTS) where latency is spent; dashed bars are modeled sub-stages"
         >
           <!-- lane label gutter -->
           <g>
@@ -551,19 +526,20 @@ function onSegKey(e: KeyboardEvent, s: Segment) {
             >
               <TooltipTrigger as-child>
                 <g
-                  :tabindex="s.ev.turnIdx != null ? 0 : undefined"
-                  :role="s.ev.turnIdx != null ? 'button' : undefined"
-                  :aria-label="s.ev.turnIdx != null ? `${segLabel(s)}, turn ${s.ev.turnIdx} — activate to highlight transcript` : segLabel(s)"
+                  :tabindex="s.ev.entryIdx != null ? 0 : undefined"
+                  :role="s.ev.entryIdx != null ? 'button' : undefined"
+                  :aria-label="s.ev.entryIdx != null ? `${segLabel(s)}, entry ${s.ev.entryIdx} — activate to highlight transcript` : segLabel(s)"
                   :class="cn(
                     'outline-none',
                     'motion-safe:transition-opacity motion-safe:duration-[var(--dur)] motion-safe:ease-[var(--ease)]',
-                    s.ev.turnIdx != null ? 'cursor-pointer focus-visible:[&>rect:first-of-type]:stroke-primary' : 'cursor-default',
+                    s.ev.entryIdx != null ? 'cursor-pointer focus-visible:[&>rect:first-of-type]:stroke-primary' : 'cursor-default',
                     activeTurnIdx != null && !s.active ? 'opacity-40' : 'opacity-100'
                   )"
                   @click="onSegClick(s)"
                   @keydown="onSegKey($event, s)"
                 >
-                  <!-- the bar — cost segments tint by latency vs budget (P30) -->
+                  <!-- the bar — cost segments tint by latency vs budget; modeled
+                       sub-stages carry a dashed outline so they read as modeled -->
                   <rect
                     :x="s.x"
                     :y="s.y + 5"
@@ -571,12 +547,14 @@ function onSegKey(e: KeyboardEvent, s: Segment) {
                     :height="LANE_H - 10"
                     :rx="s.lane.cost ? 3 : 5"
                     :style="{ fill: s.fill }"
-                    stroke-width="1.5"
-                    vector-effect="non-scaling-stroke"
+                    stroke-width="1.2"
+                    :stroke-dasharray="s.modeled ? '3 2' : '0'"
                     :class="cn(
+                      s.modeled ? 'stroke-muted-foreground/50' : 'stroke-transparent',
                       s.lane.cost ? (s.over ? 'opacity-100' : 'opacity-80') : 'opacity-70',
                       'hover:opacity-100'
                     )"
+                    vector-effect="non-scaling-stroke"
                   />
                   <!-- active highlight ring (accent) -->
                   <rect
@@ -591,8 +569,7 @@ function onSegKey(e: KeyboardEvent, s: Segment) {
                     stroke-width="2"
                     vector-effect="non-scaling-stroke"
                   />
-                  <!-- diagonal hatch ONLY on OVER-budget cost bars so the hatch
-                       marks real overspend, not stage identity (P30) -->
+                  <!-- diagonal hatch ONLY on OVER-budget cost bars -->
                   <rect
                     v-if="s.over"
                     :x="s.x"
@@ -609,11 +586,15 @@ function onSegKey(e: KeyboardEvent, s: Segment) {
                 <div class="font-medium">
                   {{ segLabel(s) }}
                 </div>
+                <div class="mt-0.5 flex items-center gap-1.5 text-muted-foreground">
+                  <span :class="cn('inline-block size-1.5 rounded-full', s.modeled ? 'bg-warning' : 'bg-success')" />
+                  {{ s.modeled ? 'Modeled sub-stage' : 'Real timing' }}
+                </div>
                 <div
-                  v-if="s.ev.turnIdx != null"
+                  v-if="s.ev.entryIdx != null"
                   class="mt-0.5 text-muted-foreground"
                 >
-                  Turn #{{ s.ev.turnIdx }} · click to highlight transcript
+                  Entry #{{ s.ev.entryIdx }} · click to highlight transcript
                 </div>
               </TooltipContent>
             </Tooltip>
@@ -632,7 +613,6 @@ function onSegKey(e: KeyboardEvent, s: Segment) {
                   :aria-label="`Interruption (barge-in) at ${fmtDur(it.ev.tStartMs)}`"
                   class="cursor-pointer outline-none focus-visible:[&>line]:stroke-primary"
                 >
-                  <!-- invisible wide hit area -->
                   <rect
                     :x="it.x - 4"
                     :y="TOP_PAD - 4"
@@ -660,7 +640,7 @@ function onSegKey(e: KeyboardEvent, s: Segment) {
                   Interruption (barge-in)
                 </div>
                 <div class="mt-0.5 text-muted-foreground">
-                  {{ it.ev.type }} @ {{ fmtDur(it.ev.tStartMs) }}<span v-if="it.ev.turnIdx != null"> · turn #{{ it.ev.turnIdx }}</span>
+                  @ {{ fmtDur(it.ev.tStartMs) }}<span v-if="it.ev.entryIdx != null"> · entry #{{ it.ev.entryIdx }}</span>
                 </div>
               </TooltipContent>
             </Tooltip>
@@ -688,8 +668,7 @@ function onSegKey(e: KeyboardEvent, s: Segment) {
         </svg>
       </div>
 
-      <!-- Legend — color is a KEY for where latency is spent, not decoration.
-         Cost lanes split by latency-vs-budget so saturation = real overspend. -->
+      <!-- Legend — color is a KEY for where latency is spent, not decoration. -->
       <div class="flex flex-wrap items-center gap-x-4 gap-y-2 border-t pt-3 text-[12px] text-muted-foreground">
         <span class="font-medium text-foreground">Where time is spent</span>
         <span class="inline-flex items-center gap-1.5">
@@ -717,28 +696,28 @@ function onSegKey(e: KeyboardEvent, s: Segment) {
           Cost stage over budget
         </span>
         <span class="inline-flex items-center gap-1.5">
+          <span class="size-2.5 rounded-[3px] border border-dashed border-muted-foreground/60" />
+          Modeled sub-stage
+        </span>
+        <span class="inline-flex items-center gap-1.5">
           <span class="h-3 w-px bg-danger" />
           Interruption
         </span>
         <span class="inline-flex items-center gap-1.5">
           <span class="size-2.5 rounded-[3px] ring-2 ring-inset ring-primary" />
-          Selected turn
+          Selected entry
         </span>
       </div>
 
-      <!-- Static captions — interaction hint + one-line Modeled-timing definition
-         so a first-time reader knows what "Modeled timing" means (lexicon). -->
+      <!-- Static captions — interaction hint + one-line honesty definition. -->
       <p class="text-[12px] text-muted-foreground">
-        Click a bar to highlight the cited turn in the transcript.
+        Click a bar to highlight the cited entry in the transcript.
       </p>
-      <p
-        v-if="isModeled"
-        class="text-[12px] text-muted-foreground"
-      >
-        <span class="font-medium text-foreground">Modeled timing:</span>
-        per-stage durations are estimated from published LiveKit budgets (HighLevel
-        doesn't expose them) and rescaled to the call's real length — proportions,
-        not measured wall-clock offsets.
+      <p class="text-[12px] text-muted-foreground">
+        <span class="font-medium text-foreground">Partial-real timeline:</span>
+        the response-latency headline and per-turn latencies are measured from
+        HighLevel's transcript; the per-stage breakdown (dashed bars) is modeled
+        from published LiveKit budgets and rescaled to this call's real length.
       </p>
     </div>
   </TooltipProvider>

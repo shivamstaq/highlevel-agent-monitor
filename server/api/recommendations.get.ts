@@ -8,11 +8,16 @@
  * to the top of the worklist.
  *
  * Query: ?agentId=<id> scopes the queue to a single agent (optional).
- * Tolerates empty storage (returns []).
+ *
+ * HOT READ PATH: reads ONLY the write-time index records via getItem
+ * (`index:fleet`, `index:agents`, `index:calls`) — ZERO getKeys / list / getAnalysis.
+ * `topRecommendations` runs over the compact AnalysisSummary projections held in
+ * `index:fleet`; the agents/calls indexes supply the deep-link sources. The
+ * agentId scope is applied in memory over the summaries. Empty KV -> [].
  */
-import { getAnalysis, listAgents, listCalls } from '../services/db'
+import { getAgentsIndex, getCallsIndex, getFleetIndex } from '../services/db'
 import { topRecommendations } from '../utils/rollup'
-import type { Analysis, RecommendationItem } from '#shared/types'
+import type { RecommendationItem } from '#shared/types'
 
 const SEVERITY_RANK = { low: 0, medium: 1, high: 2 } as const
 
@@ -20,27 +25,28 @@ export default defineEventHandler(async (event): Promise<RecommendationItem[]> =
   const query = getQuery(event)
   const agentId = typeof query.agentId === 'string' && query.agentId ? query.agentId : undefined
 
-  const [agents, calls] = await Promise.all([
-    listAgents(),
-    listCalls(agentId ? { agentId } : undefined)
+  const [fleetIndex, agentsIndex, callsIndex] = await Promise.all([
+    getFleetIndex(),
+    getAgentsIndex(),
+    getCallsIndex()
   ])
 
-  // Only the (optionally agent-scoped) calls' analyses contribute, so the queue
-  // can never surface advice from a call outside the requested scope.
-  const analyses = (await Promise.all(calls.map(c => getAnalysis(c.id))))
-    .filter((a): a is Analysis => a != null)
+  // Only the (optionally agent-scoped) analyses contribute, so the queue can
+  // never surface advice from a call outside the requested scope.
+  let summaries = Object.values(fleetIndex?.summaries ?? {})
+  if (agentId) summaries = summaries.filter(s => s.agentId === agentId)
 
-  const agentsById = new Map(agents.map(a => [a.id, a]))
-  const callsById = new Map(calls.map(c => [c.id, c]))
+  const agentsById = new Map(Object.values(agentsIndex.agents).map(a => [a.ghl.id, a]))
+  const callsById = new Map(Object.values(callsIndex.calls).map(c => [c.id, c]))
 
   // Full deduped list (no cap), then re-rank by impact, then source recency.
-  const items = topRecommendations(analyses, Infinity, { agentsById, callsById })
+  const items = topRecommendations(summaries, Infinity, { agentsById, callsById })
 
   return items.sort((a, b) => {
     const impactDiff
       = SEVERITY_RANK[b.recommendation.impact] - SEVERITY_RANK[a.recommendation.impact]
     if (impactDiff !== 0) return impactDiff
     // Most recent source call first; items without a known time sort last.
-    return (b.callStartedAt ?? '').localeCompare(a.callStartedAt ?? '')
+    return (b.callCreatedAt ?? '').localeCompare(a.callCreatedAt ?? '')
   })
 })

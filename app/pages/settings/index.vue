@@ -1,23 +1,35 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import {
+  AlertTriangle,
+  Check,
   CheckCircle2,
   Cpu,
-  Database,
+  Info,
+  KeyRound,
   Link2,
   Link2Off,
   Loader2,
   MapPin,
   RefreshCw,
   RotateCw,
+  Save,
   Sparkles,
   User
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
-import type { AppContext } from '~/composables/useApi'
+import type { AppContext, LlmProviderId, LlmSettings, SaveLlmSettings } from '~/composables/useApi'
 import SectionCard from '~/components/SectionCard.vue'
 import { Button } from '~/components/ui/button'
-import { Separator } from '~/components/ui/separator'
+import { Input } from '~/components/ui/input'
+import { Label } from '~/components/ui/label'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from '~/components/ui/select'
 import { useGhlBridge } from '~/composables/useGhlBridge'
 import { useBreadcrumb } from '~/composables/useBreadcrumb'
 
@@ -32,10 +44,9 @@ import { useBreadcrumb } from '~/composables/useBreadcrumb'
  * GHL connection is resolved live via useGhlBridge (the iframe handshake) — the
  * composable was previously dead code; this is where it's actually invoked.
  */
-const { syncCalls, seed, getContext } = useApi()
+const { syncCalls, getContext, getSettings, saveSettings } = useApi()
 const { locationId, userId, email, ready } = useGhlBridge()
 const { setBreadcrumb } = useBreadcrumb()
-const runtime = useRuntimeConfig()
 
 useHead({ title: 'Settings' })
 
@@ -130,12 +141,142 @@ const resolvedUserId = computed(() => context.value?.userId ?? userId.value ?? u
 const resolvedRole = computed(() => context.value?.role)
 
 /* ----------------------------------------------------------------------------
- * LLM provider / model — resolved server-side, surfaced read-only. Only the
- * public app name is exposed to the client; provider/model selection lives in
- * server runtimeConfig, so we show what the operator can verify and label the
- * analysis as server-resolved rather than inventing a model string.
+ * Analysis engine — provider, per-role models, and write-only API keys.
+ *
+ * The effective config is resolved server-side (stored OVER runtimeConfig OVER
+ * cost-low defaults) and surfaced via GET /api/settings. API keys NEVER reach
+ * the browser — only their presence (anthropicKeySet / openaiKeySet). Editing a
+ * key field and saving sets/replaces it; leaving it blank preserves the stored
+ * key (write-only). The active provider/model is shown so the operator can
+ * verify exactly what scores their calls.
  * ------------------------------------------------------------------------- */
-const appName = computed(() => runtime.public.appName as string)
+
+/** Model menus per provider (from docs/model-plan.md — the keys-enabled set). */
+const ANTHROPIC_MODELS = [
+  { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6 — default reasoner' },
+  { value: 'claude-opus-4-8', label: 'Claude Opus 4.8 — upgrade (pricier)' },
+  { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5 — default labeler' }
+] as const
+const OPENAI_MODELS = [
+  { value: 'gpt-5.5', label: 'GPT-5.5 — reasoner' },
+  { value: 'o3-mini', label: 'o3-mini — cheaper reasoner' },
+  { value: 'gpt-5.4-mini', label: 'GPT-5.4 mini — labeler' }
+] as const
+
+const PROVIDER_OPTIONS: { value: LlmProviderId, label: string }[] = [
+  { value: 'mock', label: 'Mock — deterministic, zero cost' },
+  { value: 'anthropic', label: 'Anthropic (Claude)' },
+  { value: 'openai', label: 'OpenAI (GPT)' },
+  { value: 'ollama', label: 'Ollama — local' }
+]
+
+/** Live engine config from the server (presence booleans, never key values). */
+const engine = ref<LlmSettings | null>(null)
+const engineLoading = ref(true)
+
+/** Editable form state (seeded from the server config on load). */
+const formProvider = ref<LlmProviderId>('mock')
+const formReasoner = ref('claude-sonnet-4-6')
+const formLabeler = ref('claude-haiku-4-5')
+/** Key inputs are blank by default — typing a value sets/replaces; blank preserves. */
+const formAnthropicKey = ref('')
+const formOpenaiKey = ref('')
+
+/** Models shown in the per-role selects depend on the chosen provider. */
+const reasonerModelOptions = computed(() => {
+  if (formProvider.value === 'openai') return [...OPENAI_MODELS]
+  return [...ANTHROPIC_MODELS]
+})
+const labelerModelOptions = reasonerModelOptions
+
+/** Whether the selected provider needs its own API key (and which is set). */
+const needsAnthropicKey = computed(() => formProvider.value === 'anthropic')
+const needsOpenaiKey = computed(() => formProvider.value === 'openai')
+
+const anthropicKeySet = computed(() => Boolean(engine.value?.anthropicKeySet))
+const openaiKeySet = computed(() => Boolean(engine.value?.openaiKeySet))
+
+async function loadEngine() {
+  engineLoading.value = true
+  try {
+    const cfg = await getSettings()
+    engine.value = cfg
+    formProvider.value = cfg.provider
+    formReasoner.value = cfg.reasonerModel
+    formLabeler.value = cfg.labelerModel
+  } catch {
+    // Best-effort: leave the cost-low defaults in the form if the load fails.
+  } finally {
+    engineLoading.value = false
+  }
+}
+
+onMounted(loadEngine)
+
+const savingEngine = ref(false)
+async function saveEngine() {
+  savingEngine.value = true
+  try {
+    const body: SaveLlmSettings = {
+      provider: formProvider.value,
+      reasonerModel: formReasoner.value,
+      labelerModel: formLabeler.value
+    }
+    // Keys are write-only: only send when the operator typed something.
+    if (formAnthropicKey.value.trim()) body.anthropicKey = formAnthropicKey.value.trim()
+    if (formOpenaiKey.value.trim()) body.openaiKey = formOpenaiKey.value.trim()
+
+    const cfg = await saveSettings(body)
+    engine.value = cfg
+    formProvider.value = cfg.provider
+    formReasoner.value = cfg.reasonerModel
+    formLabeler.value = cfg.labelerModel
+    // Clear the key inputs after a successful save — they're never echoed back.
+    formAnthropicKey.value = ''
+    formOpenaiKey.value = ''
+    toast.success('Analysis engine saved', {
+      description: `Now using ${PROVIDER_OPTIONS.find(p => p.value === cfg.provider)?.label ?? cfg.provider}.`
+    })
+  } catch {
+    toast.error('Couldn\'t save the analysis engine', {
+      description: 'The settings request failed. Check your connection and try again.'
+    })
+  } finally {
+    savingEngine.value = false
+  }
+}
+
+/** Human label for the active provider, shown in the "active" line. */
+const activeProviderLabel = computed(() =>
+  PROVIDER_OPTIONS.find(p => p.value === engine.value?.provider)?.label
+  ?? engine.value?.provider
+  ?? '—'
+)
+
+/* ----------------------------------------------------------------------------
+ * Analysis-status honesty (USER MANDATE: an operator must see at a glance whether
+ * REAL Claude analysis is on, vs the zero-cost deterministic 'mock' floor, vs a
+ * cloud provider that's selected but un-keyed and will silently fall back).
+ *
+ * Derived purely from the presence booleans GET /api/settings already returns —
+ * no key value ever reaches the browser:
+ *   · 'live'         — a cloud provider is selected AND its key is set. Real LLM
+ *                       analysis scores calls right now.
+ *   · 'mock'         — the deterministic floor: zero cost, no real LLM.
+ *   · 'missing-key'  — a cloud provider is selected but its key is NOT set, so the
+ *                       pipeline falls back to deterministic output (flagged on
+ *                       each analyzed call as "Deterministic fallback").
+ * ------------------------------------------------------------------------- */
+type EngineStatus = 'live' | 'mock' | 'missing-key' | 'unknown'
+const engineStatus = computed<EngineStatus>(() => {
+  const e = engine.value
+  if (!e) return 'unknown'
+  if (e.provider === 'mock') return 'mock'
+  if (e.provider === 'ollama') return 'live' // local, no API key required
+  if (e.provider === 'anthropic') return e.anthropicKeySet ? 'live' : 'missing-key'
+  if (e.provider === 'openai') return e.openaiKeySet ? 'live' : 'missing-key'
+  return 'unknown'
+})
 
 /* ----------------------------------------------------------------------------
  * Sync calls from HighLevel
@@ -176,26 +317,6 @@ async function runSync() {
     syncing.value = false
   }
 }
-
-/* ----------------------------------------------------------------------------
- * Demo data (moved off the Overview header)
- * ------------------------------------------------------------------------- */
-const seeding = ref(false)
-async function loadDemo() {
-  seeding.value = true
-  try {
-    const res = await seed()
-    toast.success('Demo data loaded', {
-      description: `${res.agents} agents and ${res.calls} calls are ready to explore.`
-    })
-  } catch {
-    toast.error('Couldn\'t load demo data', {
-      description: 'The seed request failed. Try again in a moment.'
-    })
-  } finally {
-    seeding.value = false
-  }
-}
 </script>
 
 <template>
@@ -206,7 +327,7 @@ async function loadDemo() {
         Settings
       </h1>
       <p class="mt-1 text-sm text-muted-foreground">
-        Your HighLevel connection, the model that scores your calls, and tools to sync or seed data.
+        Your HighLevel connection, the model that scores your calls, and tools to sync data.
       </p>
     </div>
 
@@ -334,32 +455,278 @@ async function loadDemo() {
       </div>
     </SectionCard>
 
-    <!-- Analysis model -->
+    <!-- Analysis engine — provider & keys -->
     <SectionCard
-      title="Analysis model"
-      description="The model that scores transcripts and writes findings runs server-side."
+      title="Analysis engine — provider & keys"
+      description="Which provider and models score your transcripts. Keys are stored server-side and never returned to the browser."
     >
-      <dl class="grid gap-x-6 gap-y-4 sm:grid-cols-2">
+      <template #actions>
+        <span
+          v-if="engineLoading"
+          class="inline-flex items-center gap-1.5 rounded-full bg-muted px-2.5 py-1 text-[12px] font-medium text-muted-foreground"
+        >
+          <Loader2 class="size-3.5 motion-safe:animate-spin" />
+          Loading…
+        </span>
+        <span
+          v-else
+          class="inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-2.5 py-1 text-[12px] font-medium text-primary"
+        >
+          <Cpu class="size-3.5" />
+          {{ activeProviderLabel }}
+        </span>
+      </template>
+
+      <!-- Active, server-resolved config (honesty: what scores calls right now). -->
+      <dl class="grid gap-x-6 gap-y-4 sm:grid-cols-3">
         <div class="flex flex-col gap-1">
           <dt class="flex items-center gap-1.5 text-[12px] font-medium text-muted-foreground">
-            <Cpu class="size-3.5" /> Application
+            <Cpu class="size-3.5" /> Active provider
           </dt>
-          <dd class="text-sm font-medium">
-            {{ appName }}
+          <dd class="text-sm font-medium capitalize">
+            {{ engine?.provider ?? '—' }}
           </dd>
         </div>
         <div class="flex flex-col gap-1">
           <dt class="flex items-center gap-1.5 text-[12px] font-medium text-muted-foreground">
-            <CheckCircle2 class="size-3.5" /> Scoring model
+            <CheckCircle2 class="size-3.5" /> Reasoner model
           </dt>
-          <dd class="text-sm font-medium">
-            Managed model — set by your admin
+          <dd class="break-all font-mono text-sm">
+            {{ engine?.reasonerModel ?? '—' }}
+          </dd>
+        </div>
+        <div class="flex flex-col gap-1">
+          <dt class="flex items-center gap-1.5 text-[12px] font-medium text-muted-foreground">
+            <CheckCircle2 class="size-3.5" /> Labeler model
+          </dt>
+          <dd class="break-all font-mono text-sm">
+            {{ engine?.labelerModel ?? '—' }}
           </dd>
         </div>
       </dl>
-      <p class="mt-4 text-[12px] leading-relaxed text-muted-foreground">
-        The provider and model that score your calls are configured server-side so API keys never reach the browser. Ask your workspace admin to change which model scores calls.
-      </p>
+
+      <!-- Analysis-status banner — at-a-glance honesty about whether REAL LLM
+           analysis is on, the zero-cost mock floor is active, or a cloud provider
+           is selected but un-keyed (and will fall back). Derived from the presence
+           booleans only; no key value reaches the browser. -->
+      <div
+        v-if="!engineLoading"
+        :class="[
+          'mt-5 flex items-start gap-2.5 rounded-md px-3 py-2.5 text-[13px] leading-relaxed',
+          engineStatus === 'live' && 'bg-success-soft text-success',
+          engineStatus === 'missing-key' && 'bg-warning-soft text-warning-foreground',
+          (engineStatus === 'mock' || engineStatus === 'unknown') && 'bg-muted/60 text-muted-foreground'
+        ]"
+      >
+        <component
+          :is="engineStatus === 'live' ? Sparkles : engineStatus === 'missing-key' ? AlertTriangle : Info"
+          class="mt-0.5 size-4 shrink-0"
+        />
+        <span v-if="engineStatus === 'live'">
+          <span class="font-semibold">Live analysis is on.</span>
+          Calls are scored by {{ activeProviderLabel }} ({{ engine?.reasonerModel }}) — real LLM output, not a placeholder.
+        </span>
+        <span v-else-if="engineStatus === 'missing-key'">
+          <span class="font-semibold">{{ activeProviderLabel }} is selected but its API key isn't set.</span>
+          Until you add a key below, analysis falls back to deterministic output — every analyzed call is flagged
+          <span class="font-medium">"Deterministic fallback — not Claude-generated."</span>
+        </span>
+        <span v-else-if="engineStatus === 'mock'">
+          <span class="font-semibold">Mock engine — zero cost, deterministic.</span>
+          No real LLM is scoring calls. Select a cloud provider and add its key below to turn on live analysis.
+        </span>
+        <span v-else>
+          Resolving the active analysis engine…
+        </span>
+      </div>
+
+      <div class="mt-6 border-t pt-6">
+        <div class="grid gap-5 sm:grid-cols-2">
+          <!-- Provider -->
+          <div class="flex flex-col gap-1.5">
+            <Label for="engine-provider">Provider</Label>
+            <Select
+              v-model="formProvider"
+              :disabled="engineLoading || savingEngine"
+            >
+              <SelectTrigger
+                id="engine-provider"
+                class="w-full"
+                aria-label="Analysis provider"
+              >
+                <SelectValue placeholder="Choose a provider" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem
+                  v-for="opt in PROVIDER_OPTIONS"
+                  :key="opt.value"
+                  :value="opt.value"
+                >
+                  {{ opt.label }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <p class="text-[12px] leading-relaxed text-muted-foreground">
+              Mock stays free and deterministic until a key + cloud provider is set.
+            </p>
+          </div>
+
+          <!-- spacer to keep the model selects on their own row on sm+ -->
+          <div class="hidden sm:block" />
+
+          <!-- Reasoner model -->
+          <div class="flex flex-col gap-1.5">
+            <Label for="engine-reasoner">Reasoner model</Label>
+            <Select
+              v-model="formReasoner"
+              :disabled="engineLoading || savingEngine"
+            >
+              <SelectTrigger
+                id="engine-reasoner"
+                class="w-full"
+                aria-label="Reasoner model"
+              >
+                <SelectValue placeholder="Choose a reasoner model" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem
+                  v-for="opt in reasonerModelOptions"
+                  :key="opt.value"
+                  :value="opt.value"
+                >
+                  {{ opt.label }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <p class="text-[12px] leading-relaxed text-muted-foreground">
+              Stages, success criteria, and the per-call analysis.
+            </p>
+          </div>
+
+          <!-- Labeler model -->
+          <div class="flex flex-col gap-1.5">
+            <Label for="engine-labeler">Labeler model</Label>
+            <Select
+              v-model="formLabeler"
+              :disabled="engineLoading || savingEngine"
+            >
+              <SelectTrigger
+                id="engine-labeler"
+                class="w-full"
+                aria-label="Labeler model"
+              >
+                <SelectValue placeholder="Choose a labeler model" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem
+                  v-for="opt in labelerModelOptions"
+                  :key="opt.value"
+                  :value="opt.value"
+                >
+                  {{ opt.label }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <p class="text-[12px] leading-relaxed text-muted-foreground">
+              High-volume per-turn labeling — kept cheap and fast.
+            </p>
+          </div>
+        </div>
+
+        <!-- API keys (write-only) -->
+        <div class="mt-6 grid gap-5 sm:grid-cols-2">
+          <!-- Anthropic key -->
+          <div class="flex flex-col gap-1.5">
+            <div class="flex items-center justify-between gap-2">
+              <Label for="engine-anthropic-key">Anthropic API key</Label>
+              <span
+                :class="[
+                  'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium',
+                  anthropicKeySet ? 'bg-success-soft text-success' : 'bg-muted text-muted-foreground'
+                ]"
+              >
+                <Check
+                  v-if="anthropicKeySet"
+                  class="size-3"
+                />
+                {{ anthropicKeySet ? 'Set' : 'Not set' }}
+              </span>
+            </div>
+            <div class="relative">
+              <KeyRound class="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                id="engine-anthropic-key"
+                v-model="formAnthropicKey"
+                type="password"
+                autocomplete="off"
+                class="pl-8"
+                :placeholder="anthropicKeySet ? 'Stored — type to replace' : 'sk-ant-…'"
+                :disabled="engineLoading || savingEngine"
+              />
+            </div>
+            <p
+              v-if="needsAnthropicKey && !anthropicKeySet"
+              class="text-[12px] leading-relaxed text-warning-foreground"
+            >
+              Anthropic is selected but no key is set — analysis falls back to mock until you add one.
+            </p>
+          </div>
+
+          <!-- OpenAI key -->
+          <div class="flex flex-col gap-1.5">
+            <div class="flex items-center justify-between gap-2">
+              <Label for="engine-openai-key">OpenAI API key</Label>
+              <span
+                :class="[
+                  'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium',
+                  openaiKeySet ? 'bg-success-soft text-success' : 'bg-muted text-muted-foreground'
+                ]"
+              >
+                <Check
+                  v-if="openaiKeySet"
+                  class="size-3"
+                />
+                {{ openaiKeySet ? 'Set' : 'Not set' }}
+              </span>
+            </div>
+            <div class="relative">
+              <KeyRound class="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                id="engine-openai-key"
+                v-model="formOpenaiKey"
+                type="password"
+                autocomplete="off"
+                class="pl-8"
+                :placeholder="openaiKeySet ? 'Stored — type to replace' : 'sk-…'"
+                :disabled="engineLoading || savingEngine"
+              />
+            </div>
+            <p
+              v-if="needsOpenaiKey && !openaiKeySet"
+              class="text-[12px] leading-relaxed text-warning-foreground"
+            >
+              OpenAI is selected but no key is set — analysis falls back to mock until you add one.
+            </p>
+          </div>
+        </div>
+
+        <div class="mt-6 flex items-center justify-between gap-4">
+          <p class="text-[12px] leading-relaxed text-muted-foreground">
+            Keys are write-only — saved server-side and never returned to the browser. Leave a key blank to keep the stored one.
+          </p>
+          <Button
+            class="shrink-0"
+            :disabled="engineLoading || savingEngine"
+            @click="saveEngine"
+          >
+            <component
+              :is="savingEngine ? Loader2 : Save"
+              :class="['size-4', savingEngine && 'motion-safe:animate-spin']"
+            />
+            {{ savingEngine ? 'Saving…' : 'Save engine' }}
+          </Button>
+        </div>
+      </div>
     </SectionCard>
 
     <!-- Sync calls -->
@@ -382,37 +749,6 @@ async function loadDemo() {
           />
           {{ syncing ? 'Syncing…' : 'Sync calls' }}
         </Button>
-      </div>
-    </SectionCard>
-
-    <!-- Demo data -->
-    <SectionCard
-      title="Demo data"
-      description="Seed sample agents, calls, and analyses to explore the app."
-    >
-      <div class="flex flex-col gap-4">
-        <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <p class="max-w-md text-sm text-muted-foreground">
-            Loads a curated dataset of Voice AI agents with scored transcripts and findings. Reloading replaces the current demo data.
-          </p>
-          <Button
-            variant="outline"
-            class="shrink-0"
-            :disabled="seeding"
-            @click="loadDemo"
-          >
-            <component
-              :is="seeding ? Loader2 : Sparkles"
-              :class="['size-4', seeding && 'motion-safe:animate-spin']"
-            />
-            {{ seeding ? 'Loading demo data…' : 'Load demo data' }}
-          </Button>
-        </div>
-        <Separator />
-        <p class="flex items-start gap-2 text-[12px] leading-relaxed text-muted-foreground">
-          <Database class="mt-0.5 size-3.5 shrink-0" />
-          Demo data lives alongside synced calls. Use it to try the dashboard before connecting a live location.
-        </p>
       </div>
     </SectionCard>
   </div>

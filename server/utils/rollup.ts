@@ -1,11 +1,18 @@
+// CREATED (our eval layer)
 /**
- * Shared aggregation helpers for the read API.
+ * Shared aggregation helpers for the read API (M5 rollup).
  *
  * These functions turn the flat stored entities (Agent / Call / Analysis) into
  * the composite shapes the dashboard consumes (AgentHealth / FleetStats /
- * CallListItem). They are pure: given the raw rows they compute the rollups, so
- * they are trivially testable and tolerate calls that have not been analyzed yet
- * (score null, topSeverity null).
+ * CallListItem / RecommendationItem). They are pure: given the raw rows they
+ * compute the rollups, so they are trivially testable and tolerate calls that
+ * have not been analyzed yet (score null, topSeverity null, conformance null).
+ *
+ * Contract note (redesign §2): the enriched `Agent` wraps the borrowed GHL record
+ * (`agent.ghl.id` / `agent.ghl.agentName`), a `Call` is timestamped by
+ * `createdAt`, and flow conformance lives on `analysis.conformance` (the
+ * deterministic FlowConformance from conformance.ts). All metrics trace to those
+ * real fields; nothing is invented.
  */
 import type {
   Agent,
@@ -14,30 +21,176 @@ import type {
   Call,
   CallListItem,
   FleetStats,
+  FlowAlignment,
   Recommendation,
   RecommendationItem,
   Severity
 } from '#shared/types'
+
+/**
+ * Flow adherence (0–100) for ONE call — the single, honest flow metric (R3).
+ *
+ * = share of APPLICABLE intended-flow steps the agent handled on-track. Applicable
+ * = nodes the call actually reached (status ≠ not_reached); the numerator is the
+ * `on_track` count. `drifted`/`skipped` lower it; branches the caller never took
+ * (`not_reached`) are excluded so the agent isn't penalised for paths that didn't
+ * apply. Null when there's no alignment yet (UI shows "—", never a fabricated 0).
+ *
+ * This REPLACES the retired deterministic `conformance.conformanceScore`, which
+ * only checked graph traversal and clustered near 100, contradicting the drift the
+ * UI now shows. Defining it once here keeps the per-call tile and every aggregate
+ * in exact agreement.
+ */
+export function computeFlowAdherence(alignment: FlowAlignment | null | undefined): number | null {
+  if (!alignment) return null
+  const applicable = alignment.nodeAlignments.filter(n => n.status !== 'not_reached')
+  if (applicable.length === 0) return null
+  const onTrack = applicable.filter(n => n.status === 'on_track').length
+  return Math.round((100 * onTrack) / applicable.length)
+}
+
+/* ============================================================================
+ * Rollup index (write-time summary) — KV-scale read path.
+ *
+ * On Cloudflare KV a full fleet read previously scanned every `analyses:<id>`
+ * value (N list + N get subrequests, each value carrying the full transcript-
+ * derived findings/timeline/stageSet). That blows the 1000-subrequest budget
+ * once the call volume grows. To keep the Overview/Agent-list endpoints O(1),
+ * `upsertAnalysis` maintains a single compact `index:fleet` record holding ONLY
+ * the small fields these rollup functions read — never the heavy analysis body.
+ *
+ * `AnalysisSummary` is the projection of `Analysis` that the fleet/agent rollups
+ * and the trend chart consume. It MUST stay a strict subset of what the full-
+ * object code paths below read, so summary-driven metrics match scan-driven
+ * metrics exactly (parity is asserted in tests).
+ * ========================================================================== */
+
+/** A finding reduced to the only attribute the rollups read: its severity. */
+export interface FindingSummary {
+  severity: Severity
+}
+
+/** Compact per-analysis projection stored in the fleet index. */
+export interface AnalysisSummary {
+  callId: string
+  agentId: string
+  createdAt: string
+  /** scorecard.overall */
+  overall: number
+  /** scorecard.perCriterion met flags (true count / total drives criteriaMetRate). */
+  criteria: { met: boolean }[]
+  /** Just severities — drives isFailure / topSeverity without the finding bodies. */
+  findings: FindingSummary[]
+  /** useActions.length — the rollups only ever sum the count. */
+  useActionCount: number
+  /** Flow adherence 0–100 (from flowAlignment), else null. The R3 flow metric. */
+  flowAdherence: number | null
+  /** Kept whole: small relative to transcripts and needed for the fix-queue dedup. */
+  recommendations: Recommendation[]
+}
+
+/** The single stored fleet index object (`index:fleet`). */
+export interface FleetIndex {
+  /** version lets a future shape change invalidate stale indexes and rebuild. */
+  version: number
+  /** Map of callId -> summary. Re-analysing a call overwrites its entry (no dupes). */
+  summaries: Record<string, AnalysisSummary>
+}
+
+// NOTE: the summary swapped conformanceScore → flowAdherence, but this is a
+// READ-TOLERANT change (the new code only reads flowAdherence, which is simply
+// absent on pre-existing entries → null until that call is re-analyzed, plus the
+// unchanged overall/criteria/findings). So we deliberately do NOT bump the
+// version: an existing index keeps serving scores, and re-analysis backfills
+// flowAdherence in place. A bump would discard the index with no rebuild on the
+// read path (by design, no getKeys on the hot path), erasing scores in prod.
+export const FLEET_INDEX_VERSION = 1
+
+/**
+ * The single stored agents index object (`index:agents`). Holds the FULL Agent
+ * record (including the flow graph) keyed by agentId — there are only a handful
+ * of agents so the whole map stays well under the value-size cap. Maintained on
+ * every `upsertAgent` so dashboard reads never scan `agents:<id>` keys.
+ */
+export interface AgentsIndex {
+  version: number
+  /** Map of agentId -> Agent. Re-upserting an agent overwrites its entry (no dupes). */
+  agents: Record<string, Agent>
+}
+
+export const AGENTS_INDEX_VERSION = 1
+
+/**
+ * The single stored calls index object (`index:calls`). Holds the small Call
+ * record (NO transcript/analysis bodies) keyed by callId. Maintained on every
+ * `upsertCall` so the calls table / fleet rollup read ONE object instead of an
+ * N-key `calls:<id>` scan.
+ */
+export interface CallsIndex {
+  version: number
+  /** Map of callId -> Call. Re-upserting a call overwrites its entry (no dupes). */
+  calls: Record<string, Call>
+}
+
+export const CALLS_INDEX_VERSION = 1
+
+/** Accept either a full Analysis or an already-projected summary as a summary. */
+function asHealthRow(a: Analysis | AnalysisSummary): AnalysisSummary {
+  return 'scorecard' in a ? toAnalysisSummary(a) : a
+}
+
+/** Project a full Analysis down to the compact summary the index stores. */
+export function toAnalysisSummary(a: Analysis): AnalysisSummary {
+  return {
+    callId: a.callId,
+    agentId: a.agentId,
+    createdAt: a.createdAt,
+    overall: a.scorecard.overall,
+    criteria: a.scorecard.perCriterion.map(c => ({ met: c.met })),
+    findings: a.findings.map(f => ({ severity: f.severity })),
+    useActionCount: a.useActions.length,
+    flowAdherence: computeFlowAdherence(a.flowAlignment),
+    recommendations: a.recommendations
+  }
+}
 
 /** A call is a "failure" if it scored below this, or carries a high finding. */
 const FAILURE_SCORE_THRESHOLD = 60
 
 const SEVERITY_RANK: Record<Severity, number> = { low: 0, medium: 1, high: 2 }
 
-/** Does this analysis carry at least one high-severity finding? */
-function hasHighSeverityFailure(analysis: Analysis): boolean {
-  return analysis.findings.some(f => f.severity === 'high')
+/**
+ * Failure / severity predicates operate on the SUMMARY shape (just overall +
+ * finding severities), so they run identically against a full Analysis and
+ * against an index `AnalysisSummary`. A full Analysis is structurally a superset,
+ * so it is accepted directly.
+ */
+type ScoredSummary = Pick<AnalysisSummary, 'overall' | 'findings'>
+
+function asSummaryScore(a: Analysis | ScoredSummary): ScoredSummary {
+  // Analysis nests the score under scorecard; the summary hoists it to `overall`.
+  return 'scorecard' in a
+    ? { overall: a.scorecard.overall, findings: a.findings.map(f => ({ severity: f.severity })) }
+    : a
+}
+
+/** Does this carry at least one high-severity finding? */
+function hasHighSeverityFailure(a: Analysis | ScoredSummary): boolean {
+  return asSummaryScore(a).findings.some(f => f.severity === 'high')
 }
 
 /** A call counts as a failure when scored < 60 or it has a high-severity finding. */
-function isFailure(analysis: Analysis): boolean {
-  return analysis.scorecard.overall < FAILURE_SCORE_THRESHOLD || hasHighSeverityFailure(analysis)
+function isFailure(a: Analysis | ScoredSummary): boolean {
+  const s = asSummaryScore(a)
+  return s.overall < FAILURE_SCORE_THRESHOLD || hasHighSeverityFailure(s)
 }
 
-/** Highest finding severity in an analysis, or null when there are no findings. */
-function topSeverityOf(analysis: Analysis | null): Severity | null {
-  if (!analysis || analysis.findings.length === 0) return null
-  return analysis.findings.reduce<Severity>((top, f) => {
+/** Highest finding severity, or null when there are no findings. */
+function topSeverityOf(a: Analysis | ScoredSummary | null): Severity | null {
+  if (!a) return null
+  const s = asSummaryScore(a)
+  if (s.findings.length === 0) return null
+  return s.findings.reduce<Severity>((top, f) => {
     return SEVERITY_RANK[f.severity] > SEVERITY_RANK[top] ? f.severity : top
   }, 'low')
 }
@@ -49,7 +202,9 @@ function dayOf(iso: string): string {
 
 /**
  * Flatten one call + its (optional) analysis into the list-item the table renders.
- * agentName is resolved by the caller via the agent map so this stays pure.
+ * agentName is resolved by the caller via the agent map so this stays pure. The
+ * flow conformance headline (0–100) is surfaced too — null until the call is
+ * analyzed (so the UI shows "—" rather than a fabricated 0).
  */
 export function toCallListItem(
   call: Call,
@@ -61,7 +216,31 @@ export function toCallListItem(
     agentName,
     score: analysis ? analysis.scorecard.overall : null,
     topSeverity: topSeverityOf(analysis),
-    findingCount: analysis ? analysis.findings.length : 0
+    findingCount: analysis ? analysis.findings.length : 0,
+    flowAdherence: computeFlowAdherence(analysis?.flowAlignment)
+  }
+}
+
+/**
+ * Index-fed variant of {@link toCallListItem}: builds the same CallListItem off
+ * the compact `AnalysisSummary` (from `index:fleet`) instead of the full Analysis
+ * body, so the calls table reads ONLY indexes (no `getAnalysis` per row). The
+ * summary carries every field the list item surfaces — `overall` (score),
+ * `findings[].severity` (topSeverity + findingCount), and `conformanceScore` — so
+ * the output is byte-identical to the scan-based path.
+ */
+export function toCallListItemFromSummary(
+  call: Call,
+  agentName: string,
+  summary: AnalysisSummary | null
+): CallListItem {
+  return {
+    call,
+    agentName,
+    score: summary ? summary.overall : null,
+    topSeverity: topSeverityOf(summary),
+    findingCount: summary ? summary.findings.length : 0,
+    flowAdherence: summary ? summary.flowAdherence : null
   }
 }
 
@@ -73,28 +252,28 @@ export function toCallListItem(
 export function computeAgentHealth(
   agent: Agent,
   calls: Call[],
-  analysesByCallId: Map<string, Analysis>
+  analysesByCallId: Map<string, Analysis | AnalysisSummary>
 ): AgentHealth {
-  const analyzed: Analysis[] = []
+  const analyzed: AnalysisSummary[] = []
   for (const call of calls) {
     const a = analysesByCallId.get(call.id)
-    if (a) analyzed.push(a)
+    if (a) analyzed.push(asHealthRow(a))
   }
 
   const callsAnalyzed = analyzed.length
   const avgScore = callsAnalyzed
-    ? analyzed.reduce((sum, a) => sum + a.scorecard.overall, 0) / callsAnalyzed
+    ? analyzed.reduce((sum, a) => sum + a.overall, 0) / callsAnalyzed
     : 0
   const failures = analyzed.filter(isFailure).length
   const failureRate = callsAnalyzed ? failures / callsAnalyzed : 0
-  const openUseActions = analyzed.reduce((sum, a) => sum + a.useActions.length, 0)
+  const openUseActions = analyzed.reduce((sum, a) => sum + a.useActionCount, 0)
 
-  // Flow adherence: mean conformanceScore over the calls that carry a flow
-  // alignment. Stays null when none are scored so the UI can show "—" rather
-  // than a fabricated 0 (P11).
-  const scoredForFlow = analyzed.filter(a => a.flowAlignment)
-  const avgConformance = scoredForFlow.length
-    ? round1(scoredForFlow.reduce((sum, a) => sum + a.flowAlignment!.conformanceScore, 0) / scoredForFlow.length)
+  // Flow adherence: mean per-call flow adherence (from flowAlignment) over the
+  // calls that carry one. Stays null when none are scored so the UI shows "—"
+  // rather than a fabricated 0 (P11).
+  const scoredForFlow = analyzed.filter(a => a.flowAdherence != null)
+  const avgFlowAdherence = scoredForFlow.length
+    ? round1(scoredForFlow.reduce((sum, a) => sum + a.flowAdherence!, 0) / scoredForFlow.length)
     : null
 
   // Criteria met: TRUE share of success criteria met across all per-criterion
@@ -102,7 +281,7 @@ export function computeAgentHealth(
   let criteriaTotal = 0
   let criteriaMet = 0
   for (const a of analyzed) {
-    for (const cs of a.scorecard.perCriterion) {
+    for (const cs of a.criteria) {
       criteriaTotal += 1
       if (cs.met) criteriaMet += 1
     }
@@ -115,12 +294,13 @@ export function computeAgentHealth(
   }
 
   return {
-    agent,
+    agentId: agent.ghl.id,
+    agentName: agent.ghl.agentName,
     callsAnalyzed,
     avgScore: round1(avgScore),
     failureRate: round3(failureRate),
     openUseActions,
-    avgConformance,
+    avgFlowAdherence,
     criteriaMetRate,
     ...(lastAnalyzedAt ? { lastAnalyzedAt } : {})
   }
@@ -130,8 +310,8 @@ export function computeAgentHealth(
  * Lookups the recommendation rollup needs to attach a source to each item.
  * Both are optional: a missing agent/call just yields a thinner source (the
  * advice still deep-links by id). `agentsById` resolves the agent name;
- * `callsById` resolves the source call's contact name + start time, and the
- * per-call score comes from each analysis' own scorecard.
+ * `callsById` resolves the source call's start time, and the per-call score
+ * comes from each analysis' own scorecard.
  */
 export interface RecommendationSources {
   agentsById?: Map<string, Agent>
@@ -143,24 +323,47 @@ export interface RecommendationSources {
  * each tagged with the source call/agent that best represents it so the UI can
  * deep-link back (W09).
  *
- * Dedup is SEMANTIC (P10/R3-02), not string-exact: the same systemic fix is
- * keyed by `target` + the sorted set of success-criterion ids it actually
- * addresses (derived from the rec's findingIds -> findings -> criterionId in the
- * source analysis). Two calls that each raise "fix the pricing script" land on
- * the same criterion(s) and so collapse into one bucket with callCount > 1 —
- * even across agents when the criterion set matches — instead of staying
- * distinct because their model-authored titles differ word-for-word. When a rec
- * cites no criteria (no findings, or findings without a criterionId) we fall
- * back to a normalized title fingerprint so it still dedups honestly rather than
- * forcing every criteria-less rec into one mega-bucket.
+ * Dedup is SEMANTIC (P10/R3-02), not string-exact: LLM titles for the same
+ * systemic fix vary call to call, so we cluster by `target` plus a shared salient
+ * keyword (retention, callback, pricing…). Two calls that each raise the same
+ * advice collapse into one bucket with callCount > 1 — even across agents when
+ * the surface + keyword match — instead of staying distinct because their
+ * model-authored titles differ word-for-word.
  *
  * For a deduped item the carried source is the strongest contributing call:
  * highest recommendation impact, then most recent call. Sorted high impact
  * first, then by how many calls raised it. Capped at `limit` (pass `Infinity`
  * for the full fix-queue).
  */
+/**
+ * The minimal per-call projection `topRecommendations` reads. Both a full
+ * `Analysis` and an index `AnalysisSummary` satisfy it (each carries callId /
+ * agentId / createdAt / recommendations and exposes the overall score), so the
+ * fix-queue is computed identically from the scan and from the index.
+ */
+export interface RecSource {
+  callId: string
+  agentId: string
+  createdAt: string
+  recommendations: Recommendation[]
+  /** scorecard.overall — read by toRecommendationItem for the source call score. */
+  overall: number
+}
+
+/** Normalise an Analysis | AnalysisSummary down to the RecSource projection. */
+function toRecSource(a: Analysis | AnalysisSummary): RecSource {
+  const overall = 'scorecard' in a ? a.scorecard.overall : a.overall
+  return {
+    callId: a.callId,
+    agentId: a.agentId,
+    createdAt: a.createdAt,
+    recommendations: a.recommendations,
+    overall
+  }
+}
+
 export function topRecommendations(
-  analyses: Analysis[],
+  analyses: (Analysis | AnalysisSummary)[],
   limit = 6,
   sources: RecommendationSources = {}
 ): RecommendationItem[] {
@@ -174,20 +377,14 @@ export function topRecommendations(
     agentIds: Set<string>
     /** Distinct source calls that raised this advice — the honest callCount (P10). */
     callIds: Set<string>
-    /** The analysis whose call best represents this advice (source for deep-link). */
-    sourceAnalysis: Analysis
+    /** The source row whose call best represents this advice (for deep-link). */
+    sourceAnalysis: RecSource
     sourceImpact: Severity
   }
 
-  // LLM titles for the same systemic fix vary call to call ("offer retention
-  // options" vs "prompt agent to offer retention options") and recs rarely carry
-  // findingIds, so exact/criterion keying never collapses them. Cluster instead by
-  // SHARED SALIENT KEYWORD within the same target: two recs merge when they target
-  // the same surface AND share a domain term (retention, callback, pricing…). This
-  // is honest both ways — it collapses genuine repeats and, only when two agents
-  // truly give the same advice, reports agentCount>1.
   const clusters: Bucket[] = []
-  for (const analysis of analyses) {
+  for (const row of analyses) {
+    const analysis = toRecSource(row)
     for (const rec of analysis.recommendations) {
       const keywords = extractRecKeywords(rec.title)
       const bucket = clusters.find(c => c.rec.target === rec.target && hasKeywordOverlap(c.keywords, keywords))
@@ -241,9 +438,9 @@ export function topRecommendations(
     )
 }
 
-/** Resolve the source call's startedAt for tie-breaking (falls back to analysis.createdAt). */
-function analysisCallTime(analysis: Analysis, sources: RecommendationSources = {}): string {
-  return sources.callsById?.get(analysis.callId)?.startedAt ?? analysis.createdAt
+/** Resolve the source call's createdAt for tie-breaking (falls back to row.createdAt). */
+function analysisCallTime(analysis: RecSource, sources: RecommendationSources = {}): string {
+  return sources.callsById?.get(analysis.callId)?.createdAt ?? analysis.createdAt
 }
 
 /**
@@ -256,7 +453,7 @@ const REC_STOPWORDS = new Set([
   'step', 'steps', 'handle', 'handling', 'customer', 'customers', 'information', 'proper', 'specific', 'provide',
   'implement', 'confirm', 'confirmation', 'detail', 'details', 'collection', 'phrasing', 'explicit', 'reminder',
   'check', 'enhance', 'scenario', 'scenarios', 'issue', 'issues', 'address', 'about', 'should', 'make', 'adding',
-  'back', 'read', 'number', 'first', 'them', 'they', 'while', 'proceeding'
+  'back', 'read', 'number', 'first', 'them', 'they', 'while', 'proceeding', 'node', 'flow', 'add', 'strengthen'
 ])
 
 /** Salient (≥4-char, non-stopword) keywords from a recommendation title. */
@@ -280,7 +477,7 @@ interface RecommendationRecurrence {
 /** Tag one recommendation with the call/agent that raised it for deep-linking. */
 function toRecommendationItem(
   recommendation: Recommendation,
-  analysis: Analysis,
+  analysis: RecSource,
   sources: RecommendationSources,
   recurrence: RecommendationRecurrence
 ): RecommendationItem {
@@ -290,17 +487,16 @@ function toRecommendationItem(
   // Resolve the distinct agents that raised this advice into display names so the
   // card can show "across N agents" with the actual names (falls back to the id).
   const agentNames = [...recurrence.agentIds].map(
-    id => sources.agentsById?.get(id)?.name ?? id
+    id => sources.agentsById?.get(id)?.ghl.agentName ?? id
   )
 
   return {
     recommendation,
     callId: analysis.callId,
     agentId: analysis.agentId,
-    agentName: agent?.name ?? analysis.agentId,
-    ...(call?.contactName ? { contactName: call.contactName } : {}),
-    callScore: analysis.scorecard.overall,
-    ...(call?.startedAt ? { callStartedAt: call.startedAt } : {}),
+    agentName: agent?.ghl.agentName ?? analysis.agentId,
+    callScore: analysis.overall,
+    ...(call?.createdAt ? { callCreatedAt: call.createdAt } : {}),
     callCount: recurrence.callCount,
     agentCount: recurrence.agentIds.size,
     ...(agentNames.length ? { agentNames } : {})
@@ -310,14 +506,63 @@ function toRecommendationItem(
 /**
  * Roll up the whole fleet. `analyses` is every stored analysis; `calls` every
  * stored call. Tolerates empty storage (all metrics fall back to 0 / []).
+ *
+ * This is the full-object (scan) path used by the per-call detail screens and as
+ * the parity reference. The Overview/Agent-list endpoints should prefer
+ * {@link computeFleetStatsFromIndex}, which reads the same metrics off the compact
+ * `index:fleet` record (O(1) KV reads) instead of every analysis body.
  */
 export function computeFleetStats(
   agents: Agent[],
   calls: Call[],
   analyses: Analysis[]
 ): FleetStats {
-  const analysesByCallId = new Map<string, Analysis>()
-  for (const a of analyses) analysesByCallId.set(a.callId, a)
+  return computeFleetStatsFromSummaries(agents, calls, analyses.map(toAnalysisSummary))
+}
+
+/**
+ * The O(1)-read entry point for the dashboard: roll up the fleet from the compact
+ * write-time index rather than scanning every analysis. `index.summaries` is the
+ * map maintained by `upsertAnalysis` in db.ts. Metrics are byte-for-byte identical
+ * to {@link computeFleetStats} because both funnel through
+ * {@link computeFleetStatsFromSummaries} and the summary is a strict projection.
+ */
+export function computeFleetStatsFromIndex(
+  agents: Agent[],
+  calls: Call[],
+  index: FleetIndex
+): FleetStats {
+  return computeFleetStatsFromSummaries(agents, calls, Object.values(index.summaries))
+}
+
+/**
+ * The pure all-from-indexes entry point used by GET /api/agents: unpack the three
+ * write-time index maps (`index:agents`, `index:calls`, `index:fleet`) and roll up
+ * the fleet. Identical metrics to {@link computeFleetStats}/{@link computeFleetStatsFromIndex}
+ * — all three funnel through {@link computeFleetStatsFromSummaries}. With every
+ * index empty this yields the zeroed FleetStats (no throw), so the endpoint never
+ * 500s on a fresh KV.
+ */
+export function computeFleetStatsFromIndexes(
+  agentsIndex: AgentsIndex,
+  callsIndex: CallsIndex,
+  fleetIndex: FleetIndex
+): FleetStats {
+  return computeFleetStatsFromSummaries(
+    Object.values(agentsIndex.agents),
+    Object.values(callsIndex.calls),
+    Object.values(fleetIndex.summaries)
+  )
+}
+
+/** Shared core: fleet rollup over the compact summary shape. */
+function computeFleetStatsFromSummaries(
+  agents: Agent[],
+  calls: Call[],
+  summaries: AnalysisSummary[]
+): FleetStats {
+  const summaryByCallId = new Map<string, AnalysisSummary>()
+  for (const a of summaries) summaryByCallId.set(a.callId, a)
 
   const callIds = new Set(calls.map(c => c.id))
   const callsByAgent = new Map<string, Call[]>()
@@ -328,56 +573,56 @@ export function computeFleetStats(
   }
 
   const agentHealths = agents.map(agent =>
-    computeAgentHealth(agent, callsByAgent.get(agent.id) ?? [], analysesByCallId)
+    computeAgentHealth(agent, callsByAgent.get(agent.ghl.id) ?? [], summaryByCallId)
   )
 
   // Source lookups so top recommendations can deep-link to their origin (W09).
-  const agentsById = new Map(agents.map(a => [a.id, a]))
+  const agentsById = new Map(agents.map(a => [a.ghl.id, a]))
   const callsById = new Map(calls.map(c => [c.id, c]))
 
   // Fleet-level metrics only consider analyses whose call actually exists in
   // storage, so an orphaned analysis (its call was deleted) can't skew the KPIs.
   // This matches the trend chart, which iterates over stored calls.
-  const liveAnalyses = analyses.filter(a => callIds.has(a.callId))
+  const liveAnalyses = summaries.filter(a => callIds.has(a.callId))
   const callsAnalyzed = liveAnalyses.length
   const fleetHealth = callsAnalyzed
-    ? liveAnalyses.reduce((sum, a) => sum + a.scorecard.overall, 0) / callsAnalyzed
+    ? liveAnalyses.reduce((sum, a) => sum + a.overall, 0) / callsAnalyzed
     : 0
   const failures = liveAnalyses.filter(isFailure).length
   const failureRate = callsAnalyzed ? failures / callsAnalyzed : 0
-  const openUseActions = liveAnalyses.reduce((sum, a) => sum + a.useActions.length, 0)
+  const openUseActions = liveAnalyses.reduce((sum, a) => sum + a.useActionCount, 0)
 
   return {
     fleetHealth: round1(fleetHealth),
     callsAnalyzed,
     failureRate: round3(failureRate),
     openUseActions,
-    trend: buildTrend(calls, analysesByCallId),
+    trend: buildTrend(calls, summaryByCallId),
     agents: agentHealths,
     topRecommendations: topRecommendations(liveAnalyses, 6, { agentsById, callsById })
   }
 }
 
 /**
- * Average analyzed score per calendar day (by call.startedAt), ascending by date.
+ * Average analyzed score per calendar day (by call.createdAt), ascending by date.
  * Days with no analyzed call are omitted.
  */
 function buildTrend(
   calls: Call[],
-  analysesByCallId: Map<string, Analysis>
+  summaryByCallId: Map<string, AnalysisSummary>
 ): { date: string, score: number }[] {
   const byDay = new Map<string, { sum: number, n: number }>()
 
   for (const call of calls) {
-    const analysis = analysesByCallId.get(call.id)
+    const analysis = summaryByCallId.get(call.id)
     if (!analysis) continue
-    const day = dayOf(call.startedAt)
+    const day = dayOf(call.createdAt)
     const bucket = byDay.get(day)
     if (bucket) {
-      bucket.sum += analysis.scorecard.overall
+      bucket.sum += analysis.overall
       bucket.n += 1
     } else {
-      byDay.set(day, { sum: analysis.scorecard.overall, n: 1 })
+      byDay.set(day, { sum: analysis.overall, n: 1 })
     }
   }
 
