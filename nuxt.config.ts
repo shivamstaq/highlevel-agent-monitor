@@ -31,6 +31,11 @@ export default defineNuxtConfig({
     anthropicModel: process.env.ANTHROPIC_MODEL || '',
     openaiApiKey: process.env.OPENAI_API_KEY || process.env.NUXT_OPENAI_API_KEY || '',
     ghlPitToken: process.env.GHL_PIT_TOKEN || '',
+    // Write-back flywheel: a SEPARATE, write-scoped PIT used ONLY for pushing
+    // approved changes to the live agent (PATCH voice-ai/agents + agent-studio
+    // versions). Kept distinct from the read token so write is opt-in; when empty,
+    // the apply/revert routes refuse to write (read-only observability default).
+    ghlPitWriteToken: process.env.GHL_PIT_WRITE_TOKEN || '',
     ghlApiBase: process.env.GHL_API_BASE || 'https://services.leadconnectorhq.com',
     ghlLocationId: process.env.GHL_LOCATION_ID || '',
     ghlSharedSecret: process.env.GHL_SHARED_SECRET || '',

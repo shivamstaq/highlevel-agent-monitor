@@ -50,6 +50,8 @@ interface NavItem {
 const items: NavItem[] = [
   { label: 'Call logs', to: '/calls', icon: Phone, match: p => p.startsWith('/calls') },
   { label: 'Agents', to: '/agents', icon: Users, match: p => p.startsWith('/agents') }
+  // Recommendations are per-agent — reached from an agent page
+  // (/agents/:id/recommendations), not a top-level nav destination.
 ]
 
 const settingsActive = computed(() => route.path.startsWith('/settings'))

@@ -485,17 +485,90 @@ export const FindingSchema = z.object({
 })
 export type Finding = z.infer<typeof FindingSchema>
 
+/* ----------------------------------------------------------------------------
+ * Apply-ready patch (write-back flywheel). The analysis emits this INLINE so an
+ * approved recommendation can be pushed to the live GHL agent with NO further LLM
+ * call. `mode:'ops'` is preferred (surgical, composable, real diffs); `anchor`
+ * strings MUST be copied VERBATIM from the current text the model was given so
+ * apply is a deterministic find-and-replace. `mode:'rewrite'` is the fallback for
+ * sweeping changes. See docs/writeback-flywheel-plan.md.
+ * -------------------------------------------------------------------------- */
+export const PromptEditOpSchema = z.discriminatedUnion('op', [
+  z.object({ op: z.literal('replace'), anchor: z.string().min(1), replacement: z.string() }),
+  z.object({ op: z.literal('insertAfter'), anchor: z.string().min(1), text: z.string() }),
+  z.object({ op: z.literal('insertBefore'), anchor: z.string().min(1), text: z.string() }),
+  z.object({ op: z.literal('append'), text: z.string() })
+])
+export type PromptEditOp = z.infer<typeof PromptEditOpSchema>
+
+/** Either surgical anchored ops (preferred) or a full rewrite of the target text. */
+export const TextPatchSchema = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('ops'), ops: z.array(PromptEditOpSchema).min(1) }),
+  z.object({ mode: z.literal('rewrite'), fullText: z.string() })
+])
+export type TextPatch = z.infer<typeof TextPatchSchema>
+
+/**
+ * The machine-applicable change, discriminated by write target:
+ * - `prompt`       → edit the prompt-only agent's `agentPrompt` string.
+ * - `flow_node`    → edit one Agent Studio flow node's text field (`nodeId`+`field`,
+ *                    e.g. `prompt`), applied via the version PATCH.
+ * - `agent_config` → set a structured agent field (`field`, scalar/struct value).
+ * (`training` recs carry no patch — they are advisory only.)
+ */
+export const RecommendationPatchSchema = z.discriminatedUnion('target', [
+  z.object({ target: z.literal('prompt'), patch: TextPatchSchema }),
+  z.object({ target: z.literal('flow_node'), nodeId: z.string(), field: z.string(), patch: TextPatchSchema }),
+  z.object({ target: z.literal('agent_config'), field: z.string(), oldValue: z.unknown(), newValue: z.unknown() })
+])
+export type RecommendationPatch = z.infer<typeof RecommendationPatchSchema>
+
 export const RecommendationSchema = z.object({
   id: z.string(),
   target: RecommendationTargetSchema, // prompt | flow_node | agent_config | training
   title: z.string(),
   rationale: z.string(),
-  /** Paste-ready snippet the operator can apply. */
+  /** Paste-ready snippet the operator can apply (human-readable; manual fallback). */
   suggestedChange: z.string(),
+  /**
+   * Apply-ready, machine-applicable change for write-back. Optional: omitted for
+   * `training` recs, clean calls, or when no safe patch could be produced (then the
+   * operator falls back to copy-pasting `suggestedChange`).
+   */
+  applyPatch: RecommendationPatchSchema.optional(),
   findingIds: z.array(z.string()).default([]),
   impact: SeveritySchema
 })
 export type Recommendation = z.infer<typeof RecommendationSchema>
+
+/**
+ * A write-back change applied to the live GHL agent — the audit + revert record.
+ * `before`/`after` are the raw text for prompt/flow_node targets and JSON-stringified
+ * values for agent_config. One row per apply; `status` flips to 'reverted' on undo.
+ */
+export const ChangeEventSchema = z.object({
+  id: z.string(),
+  agentId: z.string(),
+  agentName: z.string().optional(),
+  recommendationId: z.string().optional(),
+  callId: z.string().optional(),
+  target: z.enum(['prompt', 'flow_node', 'agent_config']),
+  label: z.string(),
+  title: z.string().optional(),
+  /** config field name, or the flow node field (e.g. 'prompt'). */
+  field: z.string().optional(),
+  nodeId: z.string().optional(),
+  /** flow version id the node edit was written to. */
+  versionId: z.string().optional(),
+  before: z.string(),
+  after: z.string(),
+  /** True when the operator hand-edited the proposed text before applying. */
+  edited: z.boolean().default(false),
+  status: z.enum(['applied', 'reverted']),
+  appliedAt: z.string(),
+  revertedAt: z.string().optional()
+})
+export type ChangeEvent = z.infer<typeof ChangeEventSchema>
 
 /** "Use Action" — a call segment needing human intervention or flow training. */
 export const UseActionSchema = z.object({

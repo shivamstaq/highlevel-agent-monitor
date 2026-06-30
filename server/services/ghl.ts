@@ -97,6 +97,35 @@ async function ghlFetch<T>(
   return res.json() as Promise<T>
 }
 
+/**
+ * Method-capable variant for WRITES (write-back flywheel). Sends a JSON body with
+ * the configured (write-scoped) PIT + Version header. Verified live: the agent
+ * and flow-version endpoints accept a PARTIAL body (PATCH) and preserve untouched
+ * fields (docs/captures/50, 51). Throws on non-2xx so the apply route can fail loud.
+ */
+async function ghlSend<T>(
+  cfg: GhlClientConfig,
+  method: 'PATCH' | 'PUT' | 'POST',
+  path: string,
+  body: unknown,
+  query?: Record<string, string | number | boolean | undefined>
+): Promise<T> {
+  const url = new URL(path.replace(/^\//, ''), cfg.apiBase.replace(/\/$/, '') + '/')
+  for (const [k, v] of Object.entries({ locationId: cfg.locationId, ...query })) {
+    if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v))
+  }
+  const res = await fetch(url.toString(), {
+    method,
+    headers: { ...authHeaders(cfg), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+  if (!res.ok) {
+    const errBody = await res.text().catch(() => '')
+    throw new Error(`GHL ${res.status} ${res.statusText} for ${method} ${path}${errBody ? `: ${errBody.slice(0, 300)}` : ''}`)
+  }
+  return res.json().catch(() => ({})) as Promise<T>
+}
+
 export function createGhlClient(cfg: GhlClientConfig) {
   return {
     /**
@@ -209,6 +238,37 @@ export function createGhlClient(cfg: GhlClientConfig) {
         if (callLogs.length < pageSize) break // last page
       }
       return all
+    },
+
+    /* ------------------------------------------------------------------ *
+     * WRITES (write-back flywheel). Require a write-scoped PIT in `cfg`.   *
+     * ------------------------------------------------------------------ */
+
+    /**
+     * Partially update a Voice AI agent (prompt-only `agentPrompt` and config
+     * fields). Verified: PATCH voice-ai/agents/:id?locationId= with a partial body
+     * → 200, preserves untouched fields, in-place (no version bump / publish).
+     */
+    async patchAgent(agentId: string, partial: Record<string, unknown>): Promise<void> {
+      await ghlSend(cfg, 'PATCH', `voice-ai/agents/${encodeURIComponent(agentId)}`, partial)
+    },
+
+    /**
+     * Update a node-flow agent's Agent Studio version. Verified: PATCH
+     * agent-studio/agents/versions/:versionId?locationId= with `{ nodes }` (full
+     * array, one node's nodeConfig changed) → 200, persists, other nodes intact.
+     * Edits the staging draft in-place (no publish needed for unpublished drafts).
+     */
+    async patchFlowVersion(versionId: string, body: { nodes: unknown[] }): Promise<void> {
+      await ghlSend(cfg, 'PATCH', `agent-studio/agents/versions/${encodeURIComponent(versionId)}`, body)
+    },
+
+    /** Fetch the RAW (unmapped) flow version — needed to mutate a node's nodeConfig. */
+    async getRawFlowVersion(versionId: string): Promise<Record<string, unknown>> {
+      const data = await ghlFetch<{ version?: Record<string, unknown> }>(
+        cfg, `agent-studio/agents/versions/${encodeURIComponent(versionId)}`, { locationId: cfg.locationId }
+      )
+      return (data?.version ?? data) as Record<string, unknown>
     }
   }
 }

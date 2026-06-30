@@ -55,11 +55,12 @@ const STATUS_OPTIONS: { value: StatusFilter, label: string }[] = [
   { value: 'no_data', label: 'No data yet' }
 ]
 
-/** A roster row's status band — neutral until it has analyzed calls. */
+/** A roster row's status band. "No data" means literally no analyzed calls — a
+ *  SCORED agent that lands in the neutral band is "At risk", not "No data". */
 function statusOf(a: AgentHealth): StatusFilter {
   if (!a.callsAnalyzed) return 'no_data'
   const tone = scoreToneName(a.avgScore)
-  return tone === 'neutral' ? 'no_data' : tone
+  return tone === 'neutral' ? 'warning' : tone
 }
 
 const filtered = computed<AgentHealth[]>(() => {

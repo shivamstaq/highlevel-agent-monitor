@@ -67,7 +67,6 @@ interface SegmentRoute {
 const SECTION_ROUTES: Record<string, SegmentRoute> = {
   calls: { label: 'Calls', to: '/calls' },
   agents: { label: 'Agents', to: '/agents' },
-  recommendations: { label: 'Recommendations', to: '/recommendations' },
   settings: { label: 'Settings', to: '/settings' }
 }
 
@@ -103,7 +102,7 @@ export function trailFromPath(path: string): Crumb[] {
   // Root redirects to Agents (the default landing); render that as the leaf.
   if (segments.length === 0) return [{ label: 'Agents' }]
 
-  const [head, child] = segments
+  const [head, child, grandchild] = segments
   const section = head ? SECTION_ROUTES[head] : undefined
 
   // Unknown top-level route: best-effort single readable crumb.
@@ -114,13 +113,24 @@ export function trailFromPath(path: string): Crumb[] {
   // Top-level list/index page: standalone leaf (no false ancestor).
   if (!child) return [{ label: section.label }]
 
-  // Deeper page: section list becomes the clickable ancestor, child the leaf.
+  // Detail page: section list becomes the clickable ancestor, child the leaf.
   const named = head ? NAMED_LEAF_LABELS[head]?.[child] : undefined
-  const leafLabel = named ?? (head ? DETAIL_FALLBACK_LABEL[head] : undefined) ?? titleizeSegment(child)
+  const detailLabel = named ?? (head ? DETAIL_FALLBACK_LABEL[head] : undefined) ?? titleizeSegment(child)
 
+  if (!grandchild) {
+    return [
+      { label: section.label, to: section.to },
+      { label: detailLabel }
+    ]
+  }
+
+  // Sub-page of a detail (e.g. /agents/:id/recommendations): the detail itself
+  // becomes a clickable ancestor and the sub-page is the leaf. The detail label
+  // (an id fallback) is swapped to the resolved entity name by a page override.
   return [
     { label: section.label, to: section.to },
-    { label: leafLabel }
+    { label: detailLabel, to: `/${head}/${child}` },
+    { label: titleizeSegment(grandchild) }
   ]
 }
 

@@ -15,7 +15,7 @@
  * exist on the HighLevel platform and added no eval value here.
  */
 import { computed, onMounted, ref, watch, watchEffect } from 'vue'
-import { ArrowUpRight, Inbox, Lightbulb, Loader2, Route, Target } from 'lucide-vue-next'
+import { ArrowUpRight, GitCompare, Inbox, Lightbulb, Loader2, Route, Target } from 'lucide-vue-next'
 import type { CallListItem } from '#shared/types'
 import { Avatar, AvatarFallback } from '~/components/ui/avatar'
 import { Button } from '~/components/ui/button'
@@ -24,6 +24,7 @@ import { Skeleton } from '~/components/ui/skeleton'
 import SectionCard from '~/components/SectionCard.vue'
 import CallTable from '~/components/CallTable.vue'
 import RecommendationCard from '~/components/RecommendationCard.vue'
+import ChangesHistory from '~/components/ChangesHistory.vue'
 import IntendedFlowGraph from '~/components/IntendedFlowGraph.vue'
 import FlowNodeDetail from '~/components/FlowNodeDetail.vue'
 import { useApi } from '~/composables/useApi'
@@ -42,6 +43,24 @@ const { data: detail, pending, error, refresh } = await useAsyncData(
   () => getAgentDetail(id.value),
   { watch: [id] }
 )
+
+// Write-back change log for this agent → applied-state on recommendation cards.
+const { getChanges } = useApi()
+const { data: changesData, refresh: refreshChanges } = await useAsyncData(
+  () => `agent-changes-${id.value}`,
+  () => getChanges({ agentId: id.value }),
+  { watch: [id] }
+)
+const appliedByRec = computed(() => {
+  const map: Record<string, NonNullable<typeof changesData.value>[number]> = {}
+  for (const c of changesData.value ?? []) {
+    if (c.status === 'applied' && c.recommendationId) map[c.recommendationId] = c
+  }
+  return map
+})
+async function refreshAfterChange() {
+  await Promise.all([refresh(), refreshChanges()])
+}
 
 const agent = computed(() => detail.value?.agent ?? null)
 const health = computed(() => detail.value?.health)
@@ -159,7 +178,9 @@ watch([detail, hasFlow], maybeAutoMap)
                   class="flex items-start gap-1.5 text-sm text-muted-foreground"
                 >
                   <Target class="mt-0.5 size-4 shrink-0" />
-                  {{ agent.ghl.businessName }}<template v-if="agent.ghl.agentType"> · {{ agent.ghl.agentType }}</template>
+                  {{ agent.ghl.businessName }}<template v-if="agent.ghl.agentType">
+                    · {{ agent.ghl.agentType }}
+                  </template>
                 </p>
               </div>
             </div>
@@ -189,8 +210,8 @@ watch([detail, hasFlow], maybeAutoMap)
             </div>
             <div class="flex flex-col gap-1">
               <span class="text-[12px] font-medium text-muted-foreground">Failure rate</span>
-              <span :class="cn('text-2xl font-semibold tabular-nums', failureTone)">
-                {{ Math.round(health.failureRate * 100) }}%
+              <span :class="cn('text-2xl font-semibold tabular-nums', health.callsAnalyzed ? failureTone : 'text-muted-foreground')">
+                {{ health.callsAnalyzed ? `${Math.round(health.failureRate * 100)}%` : '—' }}
               </span>
             </div>
             <div class="flex flex-col gap-1">
@@ -339,6 +360,21 @@ watch([detail, hasFlow], maybeAutoMap)
           :description="recommendations.length ? 'The most common improvements across this agent’s calls.' : undefined"
           padding="dense"
         >
+          <template
+            v-if="recommendations.length"
+            #actions
+          >
+            <Button
+              as-child
+              size="sm"
+              class="gap-1.5"
+            >
+              <NuxtLink :to="`/agents/${id}/recommendations`">
+                <GitCompare class="size-3.5" />
+                View all &amp; apply
+              </NuxtLink>
+            </Button>
+          </template>
           <div
             v-if="recommendations.length"
             class="flex flex-col gap-2.5"
@@ -347,6 +383,9 @@ watch([detail, hasFlow], maybeAutoMap)
               v-for="rec in recommendations"
               :key="rec.recommendation.id"
               :item="rec"
+              :applied-change="appliedByRec[rec.recommendation.id]"
+              hide-agent-link
+              @changed="refreshAfterChange"
             />
           </div>
           <div
@@ -364,6 +403,12 @@ watch([detail, hasFlow], maybeAutoMap)
             </p>
           </div>
         </SectionCard>
+
+        <!-- Write-back change history for THIS agent (applied / reverted). -->
+        <ChangesHistory
+          :changes="changesData ?? []"
+          @changed="refreshAfterChange"
+        />
       </div>
 
       <!-- ============ CALL LOGS (each row links to its drift analysis) ============ -->

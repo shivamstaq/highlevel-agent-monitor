@@ -31,8 +31,34 @@ import type {
   InferredFlow,
   NodeStatus,
   RecommendationItem,
+  RecommendationPatch,
+  ChangeEvent,
   Severity
 } from '#shared/types'
+import type { PatchPreview } from '#shared/agentSource'
+import type { DiffHunk } from '#shared/diff'
+
+/** POST /api/agents/:id/diff — preview a recommendation patch against the live agent. */
+export interface PatchDiffResult {
+  preview: PatchPreview
+  hunks: DiffHunk[]
+  stat: { additions: number, deletions: number }
+}
+
+/** One item in an apply request (single or batch). */
+export interface ApplyChangeItem {
+  applyPatch: RecommendationPatch
+  /** Operator-edited final text (prompt/flow_node) overriding the computed patch result. */
+  editedText?: string
+  recommendationId?: string
+  callId?: string
+  title?: string
+}
+
+/** POST /api/agents/:id/apply — per-item results. */
+export interface ApplyResult {
+  results: Array<{ ok: boolean, echoConfirmed?: boolean, change?: ChangeEvent, error?: string, conflict?: boolean }>
+}
 
 /* ============================================================================
  * Client-facing response shapes that are NOT in #shared/types because they are
@@ -213,6 +239,22 @@ export function useApi() {
     /** Fleet-wide recommendations fix-queue, ranked by impact then recency. */
     getRecommendations: (query?: { agentId?: string }) =>
       $fetch<RecommendationItem[]>('/api/recommendations', { query }),
+
+    /** Preview a recommendation's apply-ready patch against the live agent (read-only). */
+    getPatchDiff: (agentId: string, applyPatch: RecommendationPatch) =>
+      $fetch<PatchDiffResult>(`/api/agents/${agentId}/diff`, { method: 'POST', body: { applyPatch } }),
+
+    /** Push approved change(s) to the live GHL agent. Single item or a batch. */
+    applyChanges: (agentId: string, items: ApplyChangeItem[]) =>
+      $fetch<ApplyResult>(`/api/agents/${agentId}/apply`, { method: 'POST', body: { items } }),
+
+    /** Undo an applied change (writes its snapshot back to the live agent). */
+    revertChange: (agentId: string, changeId: string) =>
+      $fetch<{ ok: boolean, echoConfirmed: boolean, change: ChangeEvent }>(`/api/agents/${agentId}/revert`, { method: 'POST', body: { changeId } }),
+
+    /** Write-back audit log (applied/reverted), newest first; optional agent scope. */
+    getChanges: (query?: { agentId?: string }) =>
+      $fetch<ChangeEvent[]>('/api/changes', { query }),
 
     /** Resolve the GHL/runtime context (location + user) for the Settings screen. */
     getContext: (query?: { encryptedData?: string, locationId?: string }) =>

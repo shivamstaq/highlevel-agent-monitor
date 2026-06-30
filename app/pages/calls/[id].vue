@@ -46,7 +46,7 @@ import { cn } from '~/lib/utils'
  */
 const route = useRoute()
 const id = computed(() => route.params.id as string)
-const { getCall } = useApi()
+const { getCall, getChanges } = useApi()
 const { setBreadcrumb } = useBreadcrumb()
 const { scoreTone, scoreToneSet, scoreToneName, toneClasses } = useTone()
 
@@ -54,6 +54,27 @@ const { data, pending, error, refresh } = await useAsyncData(`call-${id.value}`,
 
 const call = computed(() => data.value?.call)
 const agent = computed(() => data.value?.agent)
+
+// Write-back change log for this call's agent → applied-state on its rec cards, so
+// a fix applied from anywhere reflects here and is revertable in place.
+const { data: changesData, refresh: refreshChanges } = await useAsyncData(
+  () => `call-changes-${id.value}`,
+  () => {
+    const aid = data.value?.agent?.ghl.id
+    return aid ? getChanges({ agentId: aid }) : Promise.resolve([])
+  },
+  { watch: [() => data.value?.agent?.ghl.id] }
+)
+const appliedByRec = computed(() => {
+  const map: Record<string, NonNullable<typeof changesData.value>[number]> = {}
+  for (const c of changesData.value ?? []) {
+    if (c.status === 'applied' && c.recommendationId) map[c.recommendationId] = c
+  }
+  return map
+})
+async function refreshAfterChange() {
+  await Promise.all([refresh(), refreshChanges()])
+}
 const analysis = computed(() => data.value?.analysis)
 const transcript = computed(() => data.value?.transcript)
 const inferredFlow = computed(() => data.value?.inferredFlow ?? null)
@@ -551,6 +572,12 @@ const entryCount = computed(() => transcript.value?.entries.length ?? 0)
                           v-for="rec in analysis.recommendations"
                           :key="rec.id"
                           :recommendation="rec"
+                          :source-agent-id="agent.ghl.id"
+                          :source-call-id="id"
+                          :source-label="agent.ghl.agentName"
+                          :applied-change="appliedByRec[rec.id]"
+                          hide-agent-link
+                          @changed="refreshAfterChange"
                         />
                       </template>
                       <div

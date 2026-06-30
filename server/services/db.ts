@@ -9,8 +9,8 @@
  *   transcripts:<callId>    -> Transcript
  *   analyses:<callId>       -> Analysis
  */
-import type { Agent, Call, Transcript, Analysis, ExpectedFlow, CallTimeline, AnalysisStatus } from '#shared/types'
-import { AgentSchema, CallSchema, TranscriptSchema, AnalysisSchema, ExpectedFlowSchema, CallTimelineSchema, AnalysisStatusSchema } from '#shared/types'
+import type { Agent, Call, Transcript, Analysis, ExpectedFlow, CallTimeline, AnalysisStatus, ChangeEvent } from '#shared/types'
+import { AgentSchema, CallSchema, TranscriptSchema, AnalysisSchema, ExpectedFlowSchema, CallTimelineSchema, AnalysisStatusSchema, ChangeEventSchema } from '#shared/types'
 import type { AnalysisSummary, FleetIndex, AgentsIndex, CallsIndex } from '../utils/rollup'
 import {
   FLEET_INDEX_VERSION,
@@ -133,6 +133,27 @@ export async function upsertAgent(a: Agent): Promise<Agent> {
   // via getItem — never getKeys.
   await indexAgent(agent)
   return agent
+}
+
+/* ----------------------------------------------------------------------------
+ * Change events (write-back flywheel) — audit + revert log, keyed `changes:<id>`.
+ * ------------------------------------------------------------------------- */
+export async function upsertChange(c: ChangeEvent): Promise<ChangeEvent> {
+  const change = ChangeEventSchema.parse(c)
+  await putItem(`changes:${change.id}`, change)
+  return change
+}
+
+export async function getChange(id: string): Promise<ChangeEvent | null> {
+  const raw = await store().getItem(`changes:${id}`)
+  return raw == null ? null : ChangeEventSchema.parse(raw)
+}
+
+/** All change events, newest first. `agentId` scopes to one agent. */
+export async function listChanges(agentId?: string): Promise<ChangeEvent[]> {
+  const all = await readAll('changes:', ChangeEventSchema)
+  const scoped = agentId ? all.filter(c => c.agentId === agentId) : all
+  return scoped.sort((a, b) => b.appliedAt.localeCompare(a.appliedAt))
 }
 
 /* ----------------------------------------------------------------------------

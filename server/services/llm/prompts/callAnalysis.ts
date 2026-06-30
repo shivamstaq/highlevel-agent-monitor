@@ -30,6 +30,8 @@ import {
   SuccessCriterionSchema,
   AnalysisResultSchema
 } from '#shared/types'
+import { validateTextPatch } from '#shared/patch'
+import { resolveWritableSource, WRITABLE_CONFIG_FIELDS, currentConfigValue } from '#shared/agentSource'
 import { definePrompt } from './types'
 
 /** Vars contract for the analysis prompt. */
@@ -49,11 +51,55 @@ const SYSTEM = [
   'surface findings (deviation | failure | missed_opportunity), concrete',
   'recommendations (target: prompt | flow_node | agent_config | training), and',
   'use-actions (review | coach_agent | update_flow | escalate) for segments needing',
-  'human follow-up. EVERY finding MUST cite the transcript entry indices it is based',
-  'on via evidenceEntryIdxs. Use-actions cite an [start,end] entryRange. Be honest:',
-  'if the call went well, return few/no findings and a high score. Return ONLY the',
-  'structured object.'
+  'human follow-up. EVERY finding MUST cite ≥1 transcript entry index in',
+  'evidenceEntryIdxs — this is mandatory and checked. If you cannot ground a finding',
+  'in specific transcript entries, OMIT that finding entirely rather than emitting it',
+  'with an empty evidenceEntryIdxs. Use-actions cite an [start,end] entryRange. Be',
+  'honest: if the call went well, return few/no findings and a high score.',
+  '',
+  'APPLY-READY PATCHES (write-back): for each recommendation whose target is',
+  'writable, ALSO emit `applyPatch` so the change can be pushed to the live agent',
+  'with no further model call. Rules:',
+  '- The "CURRENT AGENT SOURCE" block below is the EXACT text that drives the agent.',
+  '  Each block is tagged with its write target. Emit a patch ONLY against a tag',
+  '  shown there. If the agent has FLOW NODE blocks, target those (`flow_node`) and',
+  '  NEVER target `prompt` — the top-level prompt is stale for flow agents.',
+  '- Prefer `applyPatch.patch = { mode:"ops", ops:[...] }` with SURGICAL, minimal,',
+  '  NON-OVERLAPPING edits. Every `anchor` MUST be copied VERBATIM (exact, unique',
+  '  substring) from the relevant source block. Use `replace`/`insertAfter`/',
+  '  `insertBefore`/`append`.',
+  '- Use `{ mode:"rewrite", fullText:"..." }` ONLY when the change restructures the',
+  '  text so much that surgical ops are impractical; `fullText` is the COMPLETE new',
+  '  text for that target.',
+  '- For `flow_node` set `nodeId` (verbatim from the tag) and `field:"prompt"`.',
+  '- For `agent_config` set `field`, `oldValue` (the current value shown in CONFIG,',
+  '  verbatim), and `newValue`.',
+  '- `target:"training"` recs are advisory — omit `applyPatch`. If you cannot form a',
+  '  safe verbatim-anchored patch, omit `applyPatch` (the operator applies manually).',
+  '- `suggestedChange` stays a short human-readable summary of the same change.',
+  'Return ONLY the structured object.'
 ].join('\n')
+
+function buildSourceBlock(agent: Agent): string {
+  const src = resolveWritableSource(agent)
+  const out: string[] = ['=== CURRENT AGENT SOURCE (copy `anchor` substrings from here EXACTLY) ===']
+  if (src.kind === 'prompt') {
+    out.push('[PROMPT]  (write target: prompt)', src.text || '(empty)')
+  } else {
+    out.push('(This is a node-flow agent — target FLOW NODE blocks, never `prompt`.)')
+    for (const n of src.nodes) {
+      out.push(`[FLOW NODE ${n.nodeId} "${n.label}"]  (write target: flow_node, nodeId=${n.nodeId}, field=prompt)`, n.text)
+    }
+  }
+  const cfg = WRITABLE_CONFIG_FIELDS
+    .map(f => ({ f, v: currentConfigValue(agent, f) }))
+    .filter(x => x.v !== undefined && x.v !== null)
+  if (cfg.length) {
+    out.push('[CONFIG]  (write target: agent_config — oldValue must match these exactly)')
+    for (const { f, v } of cfg) out.push(`- ${f} = ${JSON.stringify(v)}`)
+  }
+  return out.join('\n')
+}
 
 function buildAnalysisPrompt(agent: Agent, transcript: Transcript, criteria: SuccessCriterion[]): string {
   const rubric = criteria
@@ -62,7 +108,8 @@ function buildAnalysisPrompt(agent: Agent, transcript: Transcript, criteria: Suc
   const lines = transcript.entries.map(renderEntry).join('\n')
   return [
     `AGENT: ${agent.ghl.agentName} @ ${agent.ghl.businessName}`,
-    `GOAL PROMPT: ${truncate(agent.ghl.agentPrompt, 600)}`,
+    '',
+    buildSourceBlock(agent),
     '',
     'SUCCESS CRITERIA:',
     rubric,
@@ -90,6 +137,42 @@ function wellCitedGuardrail(out: AnalysisResult): void {
   if (out.findings.length === 0) return
   if (!out.findings.every(f => f.evidenceEntryIdxs.length > 0)) {
     throw new Error('callAnalysis: every finding must cite ≥1 transcript entry idx')
+  }
+}
+
+/**
+ * Every emitted `applyPatch` must be APPLICABLE to the agent's current source —
+ * validated here, while that source is in context, so an approved patch is known
+ * to apply (modulo later drift, re-checked at apply time). Rejects: wrong target
+ * for the agent shape, unknown flow nodes, anchors that don't match verbatim, and
+ * `agent_config` oldValues that don't match the live value. Throw → repair-retry.
+ */
+function patchApplicableGuardrail(out: AnalysisResult, vars: CallAnalysisVars): void {
+  const src = resolveWritableSource(vars.agent)
+  for (const rec of out.recommendations) {
+    const ap = rec.applyPatch
+    if (!ap) continue
+    if (ap.target === 'prompt') {
+      if (src.kind !== 'prompt') {
+        throw new Error(`rec ${rec.id}: target 'prompt' invalid for a node-flow agent — use 'flow_node'`)
+      }
+      const errs = validateTextPatch(src.text, ap.patch)
+      if (errs.length) throw new Error(`rec ${rec.id}: prompt patch not applicable: ${errs.join('; ')}`)
+    } else if (ap.target === 'flow_node') {
+      if (src.kind !== 'flow') {
+        throw new Error(`rec ${rec.id}: target 'flow_node' invalid for a prompt-only agent — use 'prompt'`)
+      }
+      const node = src.nodes.find(n => n.nodeId === ap.nodeId)
+      if (!node) throw new Error(`rec ${rec.id}: flow_node references unknown nodeId ${ap.nodeId}`)
+      const errs = validateTextPatch(node.text, ap.patch)
+      if (errs.length) throw new Error(`rec ${rec.id}: flow_node patch not applicable: ${errs.join('; ')}`)
+    } else { // agent_config
+      const cur = currentConfigValue(vars.agent, ap.field)
+      if (cur === undefined) throw new Error(`rec ${rec.id}: agent_config field '${ap.field}' is not a writable field`)
+      if (JSON.stringify(cur) !== JSON.stringify(ap.oldValue)) {
+        throw new Error(`rec ${rec.id}: agent_config oldValue for '${ap.field}' does not match the current value`)
+      }
+    }
   }
 }
 
@@ -292,17 +375,13 @@ function isTurn(e: TranscriptEntry): e is TurnEntry {
   return e.role === 'agent' || e.role === 'customer'
 }
 
-function truncate(s: string, n: number): string {
-  return s.length <= n ? s : `${s.slice(0, n - 1)}…`
-}
-
 function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, Number.isFinite(n) ? n : lo))
 }
 
 export const callAnalysisPrompt = definePrompt<CallAnalysisVars, AnalysisResult>({
   id: 'callAnalysis',
-  version: '1.0.0',
+  version: '2.0.0',
   role: 'reasoner',
   mode: 'tool',
   schemaName: SCHEMA_NAME,
@@ -310,7 +389,7 @@ export const callAnalysisPrompt = definePrompt<CallAnalysisVars, AnalysisResult>
   outputSchema: AnalysisResultSchema,
   system: () => SYSTEM,
   user: ({ agent, transcript, criteria }) => buildAnalysisPrompt(agent, transcript, criteria),
-  guardrails: [wellCitedGuardrail],
+  guardrails: [wellCitedGuardrail, patchApplicableGuardrail],
   fallback: ({ agent, transcript, criteria }) => deterministicAnalysis(agent, transcript, criteria),
   maxTokens: 16000
 })
